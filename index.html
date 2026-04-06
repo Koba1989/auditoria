@@ -57,7 +57,8 @@
       rows: [],
       fileName: "",
       filters: { search: "", seller: "Todos", status: "Todos", reason: "Todos" },
-      dashSeller: "Todos"
+      dashSeller: "Todos",
+      dashTitle: ""
     };
 
     const FIELDS = {
@@ -84,6 +85,14 @@
       return "";
     };
     const normalize = (value = "") => String(value || "").normalize("NFD").replace(/[\u0300-\u036f]/g, "").toLowerCase().trim();
+    const formatTitleLabel = (value) => {
+      const raw = String(value || "").trim();
+      return raw ? raw.replace(/\s+/g, " ").replace(/\s*\/\s*/g, " / ") : "Sem cargo informado";
+    };
+    const getTitleKey = (value) => {
+      const label = formatTitleLabel(value);
+      return label === "Sem cargo informado" ? "__sem_cargo__" : normalize(label);
+    };
     const intSafe = (value) => {
       if (value === null || value === undefined) return 0;
       if (typeof value === "number") return Number.isFinite(value) ? Math.trunc(value) : 0;
@@ -1046,6 +1055,7 @@
       const bySeller = {};
       const byReason = {};
       const byMql = {};
+      const byTitle = {};
       const byStatus = { "Descarte Correto": 0, "Descarte Duvidoso": 0, "Oportunidade Perdida": 0 };
       base.forEach(item => {
         if (!bySeller[item.seller]) bySeller[item.seller] = { total: 0, issues: 0, correct: 0, doubtful: 0, lost: 0 };
@@ -1063,8 +1073,13 @@
         }
         byReason[item.reason || "Motivo não informado"] = (byReason[item.reason || "Motivo não informado"] || 0) + 1;
         byMql[item.mql.label] = (byMql[item.mql.label] || 0) + 1;
+        const titleLabel = formatTitleLabel(item.title);
+        const titleKey = getTitleKey(item.title);
+        if (!byTitle[titleKey]) byTitle[titleKey] = { key: titleKey, name: titleLabel, count: 0 };
+        byTitle[titleKey].count++;
       });
       return {
+        base,
         total: base.length,
         correct: base.filter(item => item.specialist.classification === "Descarte Correto").length,
         doubtful: base.filter(item => item.specialist.classification === "Descarte Duvidoso").length,
@@ -1072,6 +1087,7 @@
         bySeller: Object.entries(bySeller).map(([name, v]) => ({ name, ...v, rate: v.total ? v.issues / v.total : 0 })).sort((a,b) => b.issues - a.issues || b.total - a.total),
         byReason: Object.entries(byReason).map(([name, count]) => ({ name, count })).sort((a,b) => b.count - a.count),
         byMql: Object.entries(byMql).map(([name, count]) => ({ name, count })).sort((a,b) => b.count - a.count),
+        byTitle: Object.values(byTitle).sort((a,b) => b.count - a.count || a.name.localeCompare(b.name, "pt-BR")),
         byStatus: Object.entries(byStatus).map(([name, count]) => ({ name, count })).sort((a,b) => b.count - a.count)
       };
     }
@@ -1260,16 +1276,17 @@
       `;
     }
 
-    function renderDonutCard(title, subtitle, items, centerValue, centerLabel) {
+    function renderDonutCard(title, subtitle, items, centerValue, centerLabel, options = {}) {
+      const { interactiveKey = "", activeKey = "", interactiveLabel = "" } = options;
       const validItems = items.filter(item => item.count > 0);
       if (!validItems.length) {
         return `<div class="panel rounded-xl p-6"><h3 class="text-base font-bold text-slate-800">${title}</h3><p class="mt-1 text-xs text-slate-500">${subtitle}</p><p class="mt-8 text-sm text-slate-500">Sem dados suficientes para montar este gráfico.</p></div>`;
       }
       const palette = ["#14b8a6", "#0284c7", "#f59e0b", "#f43f5e", "#6366f1", "#10b981"];
-      const topItems = validItems.slice(0, 5);
+      const topItems = validItems.slice(0, 5).map(item => ({ ...item }));
       if (validItems.length > 5) {
         const extra = validItems.slice(5).reduce((acc, item) => acc + item.count, 0);
-        if (extra) topItems.push({ name: "Outros", count: extra });
+        if (extra) topItems.push({ key: "__others__", name: "Outros", count: extra });
       }
       const total = topItems.reduce((acc, item) => acc + item.count, 0);
       let accDegrees = 0;
@@ -1280,9 +1297,12 @@
       }).join(", ");
       return `
         <div class="panel rounded-xl p-6">
-          <div class="mb-5">
-            <h3 class="text-base font-bold text-slate-800">${title}</h3>
-            <p class="mt-1 text-xs text-slate-500">${subtitle}</p>
+          <div class="mb-5 flex flex-col gap-2 lg:flex-row lg:items-start lg:justify-between">
+            <div>
+              <h3 class="text-base font-bold text-slate-800">${title}</h3>
+              <p class="mt-1 text-xs text-slate-500">${subtitle}</p>
+            </div>
+            ${interactiveKey ? `<div class="inline-flex rounded-full border border-brand-200 bg-brand-50 px-2.5 py-1 text-[10px] font-bold uppercase tracking-[0.14em] text-brand-700">${interactiveLabel || "Clique para detalhar"}</div>` : ""}
           </div>
           <div class="grid items-center gap-6 xl:grid-cols-[220px_1fr]">
             <div class="mx-auto flex h-52 w-52 items-center justify-center rounded-full" style="background: conic-gradient(${gradient});">
@@ -1293,13 +1313,23 @@
             </div>
             <div class="space-y-2">
               ${topItems.map((item, index) => `
-                <div class="flex items-center justify-between gap-4 rounded-xl border border-slate-200 px-3 py-2">
-                  <span class="flex items-center gap-3">
-                    <span class="h-3 w-3 rounded-full" style="background:${palette[index % palette.length]}"></span>
-                    <span class="truncate text-sm font-semibold text-slate-800">${item.name}</span>
-                  </span>
-                  <span class="text-sm font-bold text-slate-500">${item.count}</span>
-                </div>
+                ${interactiveKey ? `
+                  <button type="button" data-${interactiveKey}="${encodeURIComponent(item.key || item.name)}" class="flex w-full items-center justify-between gap-4 rounded-xl border px-3 py-2 text-left transition ${activeKey === (item.key || item.name) ? "border-brand-300 bg-brand-50 shadow-sm" : "border-slate-200 hover:border-brand-200 hover:bg-slate-50"}">
+                    <span class="flex min-w-0 items-center gap-3">
+                      <span class="h-3 w-3 rounded-full" style="background:${palette[index % palette.length]}"></span>
+                      <span class="truncate text-sm font-semibold text-slate-800">${item.name}</span>
+                    </span>
+                    <span class="text-sm font-bold text-slate-500">${item.count}</span>
+                  </button>
+                ` : `
+                  <div class="flex items-center justify-between gap-4 rounded-xl border border-slate-200 px-3 py-2">
+                    <span class="flex items-center gap-3">
+                      <span class="h-3 w-3 rounded-full" style="background:${palette[index % palette.length]}"></span>
+                      <span class="truncate text-sm font-semibold text-slate-800">${item.name}</span>
+                    </span>
+                    <span class="text-sm font-bold text-slate-500">${item.count}</span>
+                  </div>
+                `}
               `).join("")}
             </div>
           </div>
@@ -1310,6 +1340,16 @@
     function renderDashboard() {
       const d = dashboardData();
       const sellerOptions = sellers(state.rows).map(v => `<option ${v === state.dashSeller ? "selected" : ""}>${v}</option>`).join("");
+      const topTitleKeys = d.byTitle.slice(0, 5).map(item => item.key);
+      const activeDashTitle = state.dashTitle === "__others__"
+        ? (d.byTitle.length > 5 ? state.dashTitle : "")
+        : (d.byTitle.some(item => item.key === state.dashTitle) ? state.dashTitle : "");
+      const selectedTitleLabel = activeDashTitle === "__others__"
+        ? "Outros cargos"
+        : (d.byTitle.find(item => item.key === activeDashTitle)?.name || "");
+      const selectedTitleRows = activeDashTitle
+        ? d.base.filter(item => activeDashTitle === "__others__" ? !topTitleKeys.includes(getTitleKey(item.title)) : getTitleKey(item.title) === activeDashTitle)
+        : [];
       return `
         <div class="mx-auto w-full max-w-[1500px] pb-10">
           <div class="mb-6 flex flex-col gap-4 xl:flex-row xl:items-end xl:justify-between">
@@ -1336,6 +1376,44 @@
             ${renderDonutCard("Leitura de MQL", "Mostra a aderência comercial dos leads que chegaram ao time.", d.byMql, d.total, "leads")}
             ${renderDonutCard("Motivos de descarte", "Distribuição dos motivos registrados na base consolidada.", d.byReason, d.total, "registros")}
             ${renderDonutCard("Comparativo entre vendedores", "Volume de descartes duvidosos e oportunidades perdidas por responsável.", d.bySeller.map(item => ({ name: item.name, count: item.issues })), d.bySeller.reduce((acc, item) => acc + item.issues, 0), "revisões")}
+          </div>
+          <div class="mt-6">
+            ${renderDonutCard("Proporção de cargos", "Mostra como os cargos capturados no contato principal se distribuem na base filtrada.", d.byTitle, d.total, "cargos", { interactiveKey: "dash-title-key", activeKey: activeDashTitle, interactiveLabel: "Clique em um cargo" })}
+          </div>
+          <div class="panel mt-6 rounded-xl p-6">
+            <div class="flex flex-col gap-3 lg:flex-row lg:items-start lg:justify-between">
+              <div>
+                <h3 class="text-base font-bold text-slate-800">Leads por cargo</h3>
+                <p class="mt-1 text-xs text-slate-500">${activeDashTitle ? `Mostrando os leads do grupo "${selectedTitleLabel}" na visualização atual.` : "Clique em um cargo no gráfico acima para ver os leads desse grupo."}</p>
+              </div>
+              ${activeDashTitle ? `<button id="clearDashTitle" type="button" class="rounded-lg border border-slate-200 bg-white px-3 py-2 text-xs font-semibold text-slate-700 hover:bg-slate-50">Limpar seleção</button>` : ""}
+            </div>
+            ${activeDashTitle ? `
+              <div class="mt-4 flex flex-wrap gap-2">
+                <span class="inline-flex rounded-xl border border-brand-200 bg-brand-50 px-3 py-1.5 text-[10px] font-bold uppercase tracking-[0.16em] text-brand-700">${selectedTitleRows.length} lead(s)</span>
+                <span class="inline-flex rounded-xl border border-slate-200 bg-slate-50 px-3 py-1.5 text-[10px] font-bold uppercase tracking-[0.16em] text-slate-600">${selectedTitleLabel}</span>
+              </div>
+              <div class="mt-4 grid grid-cols-1 gap-3 xl:grid-cols-3">
+                ${selectedTitleRows.map(item => `
+                  <div class="rounded-2xl border border-slate-200 bg-white p-4 shadow-sm">
+                    <div class="flex items-start justify-between gap-3">
+                      <div class="min-w-0">
+                        <div class="truncate text-sm font-bold text-slate-900">${item.enterpriseId ? `[${item.enterpriseId}] ` : ""}${item.company}</div>
+                        <div class="mt-1 truncate text-[12px] text-slate-500">${extractContactName(item.contactDetail) || "Contato não identificado"}</div>
+                      </div>
+                      <span class="inline-flex rounded-xl border px-2 py-1 text-[10px] font-bold uppercase tracking-[0.14em] ${item.specialist.badgeCls}">${item.specialist.classification}</span>
+                    </div>
+                    <div class="mt-3 space-y-1 text-[12px] leading-5 text-slate-600">
+                      <div><span class="font-semibold text-slate-700">Cargo:</span> ${formatTitleLabel(item.title)}</div>
+                      <div><span class="font-semibold text-slate-700">Responsável:</span> ${item.seller}</div>
+                      <div><span class="font-semibold text-slate-700">Motivo:</span> ${item.reason || "Não informado"}</div>
+                    </div>
+                  </div>
+                `).join("")}
+              </div>
+            ` : `
+              <div class="mt-4 rounded-2xl border border-dashed border-slate-200 bg-slate-50 px-4 py-6 text-sm text-slate-500">Selecione um cargo no gráfico de proporção para abrir a lista dos leads correspondentes.</div>
+            `}
           </div>
           <div class="panel mt-6 rounded-xl p-6">
             <h3 class="text-base font-bold text-slate-800">Taxa de revisão por vendedor</h3>
@@ -1458,12 +1536,14 @@
       if (upload) upload.onchange = async (e) => {
         state.fileName = e.target.files.length > 1 ? `${e.target.files.length} arquivos analisados` : e.target.files[0].name;
         state.rows = await readFiles(e.target.files);
+        state.dashTitle = "";
         render();
       };
       const replaceUpload = document.getElementById("replaceUpload");
       if (replaceUpload) replaceUpload.onchange = async (e) => {
         state.fileName = e.target.files.length > 1 ? `${e.target.files.length} arquivos analisados` : e.target.files[0].name;
         state.rows = await readFiles(e.target.files);
+        state.dashTitle = "";
         render();
       };
 
@@ -1484,7 +1564,16 @@
       const reason = document.getElementById("reason");
       if (reason) reason.onchange = (e) => { state.filters.reason = e.target.value; render(); };
       const dashSeller = document.getElementById("dashSeller");
-      if (dashSeller) dashSeller.onchange = (e) => { state.dashSeller = e.target.value; render(); };
+      if (dashSeller) dashSeller.onchange = (e) => { state.dashSeller = e.target.value; state.dashTitle = ""; render(); };
+      document.querySelectorAll("[data-dash-title-key]").forEach((button) => {
+        button.onclick = () => {
+          const key = decodeURIComponent(button.dataset.dashTitleKey || "");
+          state.dashTitle = state.dashTitle === key ? "" : key;
+          render();
+        };
+      });
+      const clearDashTitle = document.getElementById("clearDashTitle");
+      if (clearDashTitle) clearDashTitle.onclick = () => { state.dashTitle = ""; render(); };
     }
 
     render();
