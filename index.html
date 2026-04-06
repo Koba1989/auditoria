@@ -68,7 +68,7 @@
       contacts: ["Número de contatos efetuados", "Numero de contatos efetuados", "Attempts"],
       calls: ["Associated Call", "Associated Calls", "Calls"],
       contactDetail: ["Associated Contact", "Associated Contacts", "Contact"],
-      title: ["Cargo [Runrun.it]", "Cargo", "Job title"],
+      title: ["Cargo [Runrun.it]", "Cargo", "Cargo do contato", "Cargo do lead", "Job title", "Job Title", "Title", "Associated Contact Job Title", "Associated Contacts Job Title", "Contact job title", "Contact Job Title", "Associated Contact Title", "Associated Contacts Title"],
       createdAt: ["Data de criação", "Data de criacao", "Create date"],
       closedAt: ["Data de fechamento", "Close date"],
       emails: ["Associated Email", "Associated Emails", "Emails"],
@@ -1032,7 +1032,7 @@
 
     function filteredRows() {
       return state.rows.filter(item => {
-        const searchBase = [item.company, item.seller, item.enterpriseId, extractContactName(item.contactDetail), extractEmail(item.contactDetail)].join(" ").toLowerCase();
+        const searchBase = [item.company, item.seller, item.enterpriseId, extractContactName(item.contactDetail), extractEmail(item.contactDetail), item.title].join(" ").toLowerCase();
         const search = !state.filters.search || searchBase.includes(state.filters.search.toLowerCase());
         const seller = state.filters.seller === "Todos" || item.seller === state.filters.seller;
         const reason = state.filters.reason === "Todos" || item.reason === state.filters.reason;
@@ -1380,12 +1380,24 @@
           <div class="panel mb-6 rounded-[24px] p-6">
             <div class="mb-5 border-b border-slate-100 pb-4 text-lg font-bold text-slate-800">Filtros</div>
             <div class="grid grid-cols-1 gap-5 md:grid-cols-4">
-              <input id="search" class="rounded-xl border border-slate-200 bg-slate-50/50 px-4 py-3 text-sm text-slate-800 outline-none" placeholder="Empresa, vendedor ou ID" value="${state.filters.search}">
-              <select id="seller" class="rounded-xl border border-slate-200 bg-slate-50/50 px-4 py-3 text-sm text-slate-800 outline-none">${sellerOptions}</select>
-              <select id="status" class="rounded-xl border border-slate-200 bg-slate-50/50 px-4 py-3 text-sm text-slate-800 outline-none">
-                ${["Todos", "Descarte Correto", "Descarte Duvidoso", "Oportunidade Perdida"].map(v => `<option ${v === state.filters.status ? "selected" : ""}>${v}</option>`).join("")}
-              </select>
-              <select id="reason" class="rounded-xl border border-slate-200 bg-slate-50/50 px-4 py-3 text-sm text-slate-800 outline-none">${reasonOptions}</select>
+              <label class="block">
+                <div class="mb-1.5 text-[10px] font-bold uppercase tracking-[0.16em] text-slate-500">Busca rápida</div>
+                <input id="search" class="w-full rounded-xl border border-slate-200 bg-slate-50/50 px-4 py-3 text-sm text-slate-800 outline-none" placeholder="Empresa, contato, cargo, vendedor ou ID" value="${state.filters.search}">
+              </label>
+              <label class="block">
+                <div class="mb-1.5 text-[10px] font-bold uppercase tracking-[0.16em] text-slate-500">Responsável</div>
+                <select id="seller" class="w-full rounded-xl border border-slate-200 bg-slate-50/50 px-4 py-3 text-sm text-slate-800 outline-none">${sellerOptions}</select>
+              </label>
+              <label class="block">
+                <div class="mb-1.5 text-[10px] font-bold uppercase tracking-[0.16em] text-slate-500">Classificação da auditoria</div>
+                <select id="status" class="w-full rounded-xl border border-slate-200 bg-slate-50/50 px-4 py-3 text-sm text-slate-800 outline-none">
+                  ${["Todos", "Descarte Correto", "Descarte Duvidoso", "Oportunidade Perdida"].map(v => `<option ${v === state.filters.status ? "selected" : ""}>${v}</option>`).join("")}
+                </select>
+              </label>
+              <label class="block">
+                <div class="mb-1.5 text-[10px] font-bold uppercase tracking-[0.16em] text-slate-500">Motivo do descarte</div>
+                <select id="reason" class="w-full rounded-xl border border-slate-200 bg-slate-50/50 px-4 py-3 text-sm text-slate-800 outline-none">${reasonOptions}</select>
+              </label>
             </div>
           </div>
           <div class="space-y-5">
