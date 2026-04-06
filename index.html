@@ -1,0 +1,1481 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>AuditoriaSales</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/PapaParse/5.4.1/papaparse.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf-autotable/3.5.31/jspdf.plugin.autotable.min.js"></script>
+  <script>
+    tailwind.config = {
+      theme: {
+        extend: {
+          colors: {
+            brand: { 50: "#f0fdfa", 500: "#14b8a6", 600: "#0d9488" },
+            audit: { dark: "#0f172a" }
+          }
+        }
+      }
+    };
+  </script>
+  <style>
+    body { margin: 0; font-family: Aptos, "Segoe UI", system-ui, sans-serif; background: radial-gradient(circle at top right, rgba(20, 184, 166, .08), transparent 20%), linear-gradient(180deg, #f8fafc 0%, #eef2f7 100%); color: #334155; }
+    .panel { background: #ffffff; border: 1px solid #dbe5f0; box-shadow: 0 16px 36px rgba(15, 23, 42, .08); }
+    .thin-scroll::-webkit-scrollbar { height: 8px; width: 8px; }
+    .thin-scroll::-webkit-scrollbar-track { background: transparent; }
+    .thin-scroll::-webkit-scrollbar-thumb { background: #cbd5e1; border-radius: 999px; }
+    .thin-scroll::-webkit-scrollbar-thumb:hover { background: #94a3b8; }
+  </style>
+</head>
+<body class="overflow-hidden">
+  <div class="flex h-screen w-screen">
+    <aside class="w-64 shrink-0 bg-audit-dark text-slate-300 flex flex-col">
+      <div class="h-16 px-6 flex items-center border-b border-slate-800">
+        <div class="h-10 w-10 rounded-xl bg-brand-50 text-brand-600 flex items-center justify-center font-bold mr-3">A</div>
+        <div class="text-white font-bold tracking-wide">Auditoria<span class="text-brand-500">Sales</span></div>
+      </div>
+      <div class="p-4 space-y-2">
+        <button id="nav-auditoria" class="nav-btn w-full rounded-lg px-3 py-2 text-left bg-brand-600/10 text-brand-400 border border-brand-500/20">Auditoria</button>
+        <button id="nav-dashboard" class="nav-btn w-full rounded-lg px-3 py-2 text-left hover:bg-slate-800">Dashboard</button>
+      </div>
+      <div class="mt-auto p-4 border-t border-slate-800 text-xs text-slate-400">
+        Sistema restaurado<br><span class="font-bold text-white">Versão estável</span>
+      </div>
+    </aside>
+
+    <main class="flex-1 overflow-auto p-8 thin-scroll">
+      <div id="app"></div>
+    </main>
+  </div>
+
+  <script>
+    const state = {
+      view: "auditoria",
+      rows: [],
+      fileName: "",
+      filters: { search: "", seller: "Todos", status: "Todos", reason: "Todos" },
+      dashSeller: "Todos"
+    };
+
+    const FIELDS = {
+      seller: ["Proprietário do negócio", "Proprietario do negocio", "Deal owner", "Owner"],
+      company: ["Nome do negócio", "Nome do negocio", "Deal name", "Company name"],
+      reason: ["Motivo do descarte (pré-vendedor)", "Motivo do descarte (pre-vendedor)", "Motivo do descarte", "Loss reason"],
+      summary: ["Resumo do Motivo de Descarte", "Resumo do motivo de descarte", "Loss reason details"],
+      contacts: ["Número de contatos efetuados", "Numero de contatos efetuados", "Attempts"],
+      calls: ["Associated Call", "Associated Calls", "Calls"],
+      contactDetail: ["Associated Contact", "Associated Contacts", "Contact"],
+      title: ["Cargo [Runrun.it]", "Cargo", "Job title"],
+      createdAt: ["Data de criação", "Data de criacao", "Create date"],
+      closedAt: ["Data de fechamento", "Close date"],
+      emails: ["Associated Email", "Associated Emails", "Emails"],
+      enterpriseId: ["[Runrun.it] Enterprise id", "Runrun.it Enterprise id", "Enterprise id", "Record ID", "ID do negócio", "ID do negocio"],
+      phone: ["Telefone (Lead)", "Phone Number", "Phone"],
+      leadType: ["Tipo de Lead", "Lead Type"]
+    };
+
+    const pick = (row, aliases) => {
+      for (const alias of aliases) {
+        if (row[alias] !== undefined && row[alias] !== null && String(row[alias]).trim() !== "") return String(row[alias]).trim();
+      }
+      return "";
+    };
+    const normalize = (value = "") => String(value || "").normalize("NFD").replace(/[\u0300-\u036f]/g, "").toLowerCase().trim();
+    const intSafe = (value) => {
+      if (value === null || value === undefined) return 0;
+      if (typeof value === "number") return Number.isFinite(value) ? Math.trunc(value) : 0;
+      const raw = String(value || "").trim();
+      if (!raw) return 0;
+      if (/^-?\d+$/.test(raw)) return parseInt(raw, 10);
+      if (/^-?\d+[.,]0+$/.test(raw)) {
+        const exactInteger = Number(raw.replace(",", "."));
+        return Number.isFinite(exactInteger) ? Math.trunc(exactInteger) : 0;
+      }
+      if (/^-?\d{1,3}([.,]\d{3})+$/.test(raw)) {
+        const groupedInteger = Number(raw.replace(/[.,]/g, ""));
+        return Number.isFinite(groupedInteger) ? groupedInteger : 0;
+      }
+      const cleaned = raw.replace(/\s+/g, "").replace(/[^0-9,.-]/g, "");
+      const lastComma = cleaned.lastIndexOf(",");
+      const lastDot = cleaned.lastIndexOf(".");
+      let normalizedNumber = cleaned;
+      if (lastComma >= 0 && lastDot >= 0) {
+        normalizedNumber = lastComma > lastDot
+          ? cleaned.replace(/\./g, "").replace(",", ".")
+          : cleaned.replace(/,/g, "");
+      } else if (lastComma >= 0) {
+        normalizedNumber = /,\d+$/.test(cleaned) ? cleaned.replace(",", ".") : cleaned.replace(/,/g, "");
+      } else if (lastDot >= 0) {
+        normalizedNumber = /\.\d+$/.test(cleaned) ? cleaned : cleaned.replace(/\./g, "");
+      }
+      const n = Number(normalizedNumber);
+      return Number.isFinite(n) ? Math.trunc(n) : 0;
+    };
+    const extractEmail = (text) => {
+      const m = String(text || "").match(/\(([^)]+)\)/);
+      return m ? m[1].trim().toLowerCase() : "";
+    };
+    const isFreeEmail = (email) => /gmail|hotmail|yahoo|outlook|bol|uol|icloud|live|msn/i.test(email || "");
+    const includesAny = (text, terms) => terms.some(term => normalize(text).includes(term));
+    const countMeaningfulWords = (text) => normalize(text).split(/\s+/).filter(word => word.length > 2 && !["que", "para", "com", "sem", "mas", "por", "uma", "um", "foi", "nao", "não"].includes(word)).length;
+    const extractContactName = (text) => String(text || "").replace(/\s*\([^)]+\)\s*/, "").trim();
+    const mergeUniqueText = (base, incoming, separator) => {
+      const splitText = (value) => String(value || "").split(separator).map(item => item.trim()).filter(Boolean);
+      const combined = [...splitText(base), ...splitText(incoming)];
+      return Array.from(new Set(combined)).join(typeof separator === "string" ? separator + " " : " | ");
+    };
+    const countCallEvents = (text) => {
+      const raw = String(text || "").trim();
+      if (!raw) return 0;
+      const explicit = raw.match(/liga[cç][aã]o|call/gi);
+      return explicit && explicit.length ? explicit.length : 1;
+    };
+    const countEmailEvents = (text) => {
+      const raw = String(text || "").trim();
+      if (!raw) return 0;
+      const directEmails = raw.match(/[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/gi);
+      if (directEmails && directEmails.length) return Array.from(new Set(directEmails)).length;
+      return raw.split(/;|\|/).map(item => item.trim()).filter(Boolean).length;
+    };
+    const countConnectedMarkers = (text) => {
+      const raw = normalize(text);
+      const hits = raw.match(/ligacao atendida|chamada com|call connected|atendeu/g);
+      return hits ? hits.length : 0;
+    };
+    const parseDateFlexible = (value) => {
+      const raw = String(value || "").trim();
+      if (!raw) return null;
+      if (/^\d{5,}$/.test(raw)) {
+        const serial = Number(raw);
+        if (serial > 20000 && serial < 90000) {
+          const utcDays = Math.floor(serial - 25569);
+          return new Date(utcDays * 86400000);
+        }
+      }
+      const br = raw.match(/^(\d{1,2})\/(\d{1,2})\/(\d{2,4})(?:\s+(\d{1,2}):(\d{2})(?::(\d{2}))?)?$/);
+      if (br) {
+        const year = br[3].length === 2 ? Number("20" + br[3]) : Number(br[3]);
+        return new Date(year, Number(br[2]) - 1, Number(br[1]), Number(br[4] || 0), Number(br[5] || 0), Number(br[6] || 0));
+      }
+      const parsed = new Date(raw);
+      return Number.isNaN(parsed.getTime()) ? null : parsed;
+    };
+    const diffDays = (startValue, endValue) => {
+      const start = parseDateFlexible(startValue);
+      const end = parseDateFlexible(endValue);
+      if (!start || !end) return null;
+      const diff = end.getTime() - start.getTime();
+      return diff < 0 ? 0 : Math.round(diff / 86400000);
+    };
+    const formatDateBR = (value) => {
+      const date = parseDateFlexible(value);
+      return date ? date.toLocaleDateString("pt-BR") : String(value || "").trim() || "não informado";
+    };
+    const countLabel = (count, singular, plural) => `${count} ${count === 1 ? singular : plural}`;
+    const joinNatural = (items) => {
+      const parts = items.map(item => String(item || "").trim()).filter(Boolean);
+      if (!parts.length) return "";
+      if (parts.length === 1) return parts[0];
+      if (parts.length === 2) return `${parts[0]} e ${parts[1]}`;
+      return `${parts.slice(0, -1).join(", ")} e ${parts[parts.length - 1]}`;
+    };
+    const getAssessmentStyle = (classification) => {
+      if (classification === "Oportunidade Perdida") {
+        return {
+          tone: "critical",
+          badgeCls: "border-rose-200 bg-rose-50 text-rose-700",
+          panelCls: "border-rose-200 bg-rose-50/70"
+        };
+      }
+      if (classification === "Descarte Duvidoso") {
+        return {
+          tone: "warning",
+          badgeCls: "border-amber-200 bg-amber-50 text-amber-700",
+          panelCls: "border-amber-200 bg-amber-50/70"
+        };
+      }
+      return {
+        tone: "good",
+        badgeCls: "border-teal-200 bg-teal-50 text-teal-700",
+        panelCls: "border-teal-200 bg-teal-50/70"
+      };
+    };
+    const isSummaryWeak = (summary, normalizedReason) => {
+      const text = String(summary || "").trim();
+      if (!text) return true;
+      const minimumLength = normalizedReason.includes("fake") ? 12 : 18;
+      const minimumWords = normalizedReason.includes("fake") ? 2 : 3;
+      return text.length < minimumLength || countMeaningfulWords(text) < minimumWords || /(.)\1{4,}/.test(text);
+    };
+    const buildChannelMixText = ({ callsCount = 0, emailsCount = 0 }) => {
+      if (callsCount > 0 && emailsCount === 0) return "A cadência ficou concentrada em ligação; não há e-mail associado no CRM.";
+      if (emailsCount > 0 && callsCount === 0) return "A cadência ficou concentrada em e-mail; não há ligação registrada no CRM.";
+      if (callsCount > 0 && emailsCount > 0) return "A cadência aparece distribuída entre ligação e e-mail no export.";
+      return "O export não traz evidência de ligação nem e-mail associados.";
+    };
+    const buildCadenceEvidenceText = ({ contacts = 0, callsCount = 0, connectedCount = 0, emailsCount = 0 }) => {
+      const identifiedTouches = callsCount + emailsCount;
+      let totalRead = "";
+      if (contacts > 0 && identifiedTouches === contacts) {
+        totalRead = `O detalhamento por canal fecha com o total principal do export: ${identifiedTouches} registro(s) identificados.`;
+      } else if (contacts > 0 && identifiedTouches < contacts) {
+        totalRead = `O total principal da auditoria é ${contacts}, mas o histórico só detalha ${identifiedTouches} registro(s) com canal explícito; ${contacts - identifiedTouches} tentativa(s) ficam sem canal visível no export.`;
+      } else if (contacts > 0 && identifiedTouches > contacts) {
+        totalRead = `O histórico detalha ${identifiedTouches} registro(s) de canal, acima das ${contacts} tentativas do campo principal; isso indica divergência no próprio export.`;
+      } else if (contacts === 0 && identifiedTouches > 0) {
+        totalRead = `O campo principal de tentativas veio zerado, mas o histórico associado mostra ${identifiedTouches} registro(s) de canal.`;
+      } else {
+        totalRead = "O export não traz evidência suficiente para fechar o total de tentativas com segurança.";
+      }
+      return `Total principal considerado: ${contacts} tentativa(s) no campo "Número de contatos efetuados / Attempts". Ligações associadas: ${callsCount}. E-mails associados: ${emailsCount}. Ligações atendidas: ${connectedCount} (subconjunto das ligações com sinal de contato efetivo). ${totalRead} ${buildChannelMixText({ callsCount, emailsCount })}`;
+    };
+    const hasExplicitDisinterestSignal = (summary) => {
+      const normalized = normalize(summary);
+      if (!normalized) return false;
+      return ["sem interesse", "nao tem interesse", "nao possui interesse", "nao quer", "nao faz sentido", "sem aderencia", "sem fit", "fora do perfil", "nao ha interesse", "ja usa concorrente", "permaneceu com concorrente", "nao prioriza"].some(term => normalized.includes(term));
+    };
+    const hasExplicitFakeSignal = (summary) => {
+      const normalized = normalize(summary);
+      if (!normalized) return false;
+      const listedSignals = ["telefone nao existe", "telefone inexistente", "telefone falso", "telefones nao existem", "telefones inexistentes", "numero errado", "numero inexistente", "numero falso", "email invalido", "email inexistente", "email falso", "empresa nao existe", "empresa inexistente", "empresa falsa", "sem nome de empresa", "nome de empresa inexistente", "contato inexistente", "lead fake", "cadastro invalido", "dados invalidos"].some(term => normalized.includes(term));
+      const invalidDataKeywords = /(nao existe(m)?|inexistent(e|es)|falso(s)?|invalido(s)?|errado(s)?|nao confere(m)?|nao pertence(m)?)/.test(normalized);
+      const fakeObjectKeywords = /(tel|telefone|telefones|numero|numeros|cel|celular|whats|whatsapp|empresa|nome de empresa|contato|email|e-mail|cadastro|dados)/.test(normalized);
+      return listedSignals || (invalidDataKeywords && fakeObjectKeywords);
+    };
+    const hasExplicitNoContactSignal = (summary) => {
+      const normalized = normalize(summary);
+      if (!normalized) return false;
+      return ["nao houve contato", "sem contato", "sem retorno", "nao retornou", "não retornou", "nao retornou os contatos", "não retornou os contatos", "sem retorno de contato", "nao respondeu", "não respondeu", "nao atendeu", "não atendeu", "sem resposta", "caixa postal", "voicemail", "nao consegui contato", "não consegui contato", "sem sucesso no contato", "lead descartado sem retorno"].some(term => normalized.includes(term));
+    };
+    const hasConversationAdvanceSignal = (summary) => {
+      const normalized = normalize(summary);
+      if (!normalized) return false;
+      return [
+        "cliente respondeu", "contato respondeu", "respondeu ao email", "respondeu por email", "retornou a ligacao", "retornou a ligação",
+        "informou", "disse", "falou", "conversamos", "conversei", "teve contato", "houve contato", "alinhamos", "reuniao", "reunião",
+        "agendou", "agendar demo", "agendar uma demo", "quis agendar", "passei os horarios", "passei os horários", "mandei os horarios",
+        "mandei os horários", "enviei os horarios", "enviei os horários", "passamos os horarios", "passamos os horários", "demo", "demonstracao", "demonstração"
+      ].some(term => normalized.includes(term));
+    };
+    const hasExplicitConversationSignal = (summary) => {
+      const normalized = normalize(summary);
+      if (!normalized) return false;
+      return hasConversationAdvanceSignal(summary);
+    };
+    const hasImplicitDisinterestSignal = (summary) => {
+      const normalized = normalize(summary);
+      if (!normalized) return false;
+      const priorEngagement = hasConversationAdvanceSignal(summary) || ["teve interesse", "demonstrou interesse", "quis entender", "quis conhecer", "avancou", "avançou"].some(term => normalized.includes(term));
+      const dropoff = [
+        "sumiu", "depois sumiu", "parou de responder", "nao respondeu mais", "não respondeu mais", "nao me atendeu mais", "não me atendeu mais",
+        "nao respondeu no whats", "não respondeu no whats", "nao respondeu no whatsapp", "não respondeu no whatsapp", "nao retornou mais",
+        "não retornou mais", "nao deu andamento", "não deu andamento", "nao seguiu", "não seguiu", "nao quis seguir", "não quis seguir"
+      ].some(term => normalized.includes(term));
+      return priorEngagement && dropoff;
+    };
+    const hasExplicitAccidentalSignupSignal = (summary) => {
+      const normalized = normalize(summary);
+      if (!normalized) return false;
+      return ["se cadastrou por engano", "cadastro por engano", "se inscreveu por engano", "preencheu por engano", "entrou por engano", "clicou por engano", "foi engano", "foi equivoco", "foi equívoco", "um equivoco", "um equívoco", "por equivoco", "por equívoco", "cadastro acidental", "inscricao acidental", "inscrição acidental", "desconsiderar o interesse", "desconsiderar interesse", "desconsidere o interesse", "desconsidere interesse", "preenchimento errado", "preencheu errado", "preencheu o formulario errado", "preencheu o formulário errado", "cadastro errado", "formulario errado", "formulário errado"].some(term => normalized.includes(term));
+    };
+    const hasExplicitResolvedNeedSignal = (summary) => {
+      const normalized = normalize(summary);
+      if (!normalized) return false;
+      return ["demanda ja foi resolvida", "demanda já foi resolvida", "ja foi resolvido", "já foi resolvido", "ja foi resolvida", "já foi resolvida", "ja resolveu", "já resolveu", "nao precisa mais", "não precisa mais", "nao tem mais demanda", "não tem mais demanda", "ja contratou", "já contratou", "ja possui fornecedor", "já possui fornecedor", "ja implementou", "já implementou", "projeto encerrado", "projeto cancelado", "necessidade encerrada", "demanda encerrada", "demanda atendida"].some(term => normalized.includes(term));
+    };
+    const hasExplicitQualificationGapSignal = (summary) => {
+      const normalized = normalize(summary);
+      if (!normalized) return false;
+      return ["fora do perfil", "fora do icp", "nao atende o perfil", "não atende o perfil", "perfil inadequado", "empresa muito pequena", "porte muito pequeno", "sem budget", "sem orcamento", "sem orçamento", "momento errado", "nao e prioridade", "não é prioridade", "segmento errado", "segmento fora", "nao e publico", "não é público", "nao e o publico", "não é o público", "nao e decisor", "não é decisor", "ja usa concorrente", "já usa concorrente", "permaneceu com concorrente", "contrato vigente", "buscava outra solucao", "buscava outra solução", "era suporte", "era fornecedor", "era vaga", "curriculo", "currículo"].some(term => normalized.includes(term));
+    };
+    const evaluateNoContactCadence = ({ contacts = 0, callsCount = 0, emailsCount = 0, summary = "" }) => {
+      const normalized = normalize(summary);
+      const hasCallNarrative = /(ligac|chamad|telefon|nao atendeu|não atendeu|sem atender)/i.test(normalized);
+      const hasEmailNarrative = /(e mail|email|e-mail)/i.test(normalized);
+      const hasWhatsNarrative = /(whats|whatsapp)/i.test(normalized);
+      const structuredMultiChannel = callsCount > 0 && emailsCount > 0;
+      const narratedMultiChannel = hasExplicitNoContactSignal(summary) && ((hasCallNarrative && hasEmailNarrative) || (hasCallNarrative && hasWhatsNarrative) || (hasEmailNarrative && hasWhatsNarrative));
+      const totalTouches = Math.max(contacts, callsCount + emailsCount);
+      const multiChannel = structuredMultiChannel || narratedMultiChannel;
+      let level = "none";
+      if (totalTouches === 0) level = "none";
+      else if (contacts >= 8 || (callsCount + emailsCount) >= 6 || (multiChannel && totalTouches >= 5)) level = "strong";
+      else if (contacts >= 5 || (callsCount + emailsCount) >= 4 || (multiChannel && totalTouches >= 4)) level = "adequate";
+      else level = "light";
+      return { level, sufficientCadence: level === "adequate" || level === "strong" };
+    };
+
+    function buildMarketFitAssessment(input) {
+      if (input.hasDocumentedFakeSignal) return { tone: "weak", status: "Origem inconsistente com MQL", detail: "O próprio histórico sugere cadastro inválido ou dado inconsistente. Esse lead não deveria ter avançado como oportunidade qualificada." };
+      if (input.hasAccidentalSignupSignal) return { tone: "weak", status: "Intenção acidental, não MQL real", detail: "O comentário indica cadastro por engano. O principal ponto de revisão é a origem do lead, não a atuação do vendedor." };
+      if (input.hasQualificationGapSignal) return { tone: "weak", status: "Lead fora do recorte de MQL", detail: "O comentário indica falta de fit, prioridade, orçamento ou perfil. A principal revisão está no critério de qualificação do lead." };
+      if (input.hasResolvedNeedSignal) return { tone: input.mql.tone === "strong" ? "moderate" : "weak", status: "Necessidade já resolvida", detail: "O lead pode até parecer aderente no cadastro, mas o comentário indica que a demanda já foi resolvida. Isso sugere timing inadequado do repasse ou perda de urgência." };
+      if (input.isSemContato && input.hasStrongCadenceEvidence && input.hasDocumentedNoContact) {
+        if (input.mql.tone === "strong") return { tone: "moderate", status: "MQL aderente, mas frio", detail: "O lead parece bom no cadastro, mas não respondeu mesmo com cadência consistente. Isso sugere timing, prioridade ou urgência baixa." };
+        return { tone: "weak", status: "Baixa aderência com baixa responsividade", detail: "Houve esforço comercial e o lead não respondeu. O padrão sugere mais problema de qualificação ou origem do que falha do vendedor." };
+      }
+      if (input.isSemInteresse && (input.hasDocumentedDisinterest || input.hasImplicitDisinterestSignal)) {
+        if (input.hasImplicitDisinterestSignal) {
+          if (input.mql.tone === "strong") return { tone: "moderate", status: "MQL aderente com perda de tração", detail: "O comentário mostra conversa ou avanço inicial e, depois, sumiço ou queda de resposta. Isso casa com perda de interesse prática, mudança de prioridade ou timing fraco." };
+          return { tone: "weak", status: "Interesse esfriou após interação", detail: "O histórico indica algum avanço inicial, mas o lead perdeu tração e parou de responder depois. O descarte pode fazer sentido sem apontar erro claro da equipe." };
+        }
+        if (input.mql.tone === "strong") return { tone: "moderate", status: "MQL aderente com objeção real", detail: "O cadastro mostra bons sinais, mas o comentário registra objeção concreta. O problema aqui parece ser momento, prioridade ou proposta de valor." };
+        return { tone: "weak", status: "Interesse fraco já na origem", detail: "O lead chegou com sinais limitados de aderência e o comentário confirma baixa intenção ou baixo fit comercial." };
+      }
+      return { tone: input.mql.tone, status: input.mql.status, detail: input.mql.basisText || "Sem base suficiente no export para avaliar a qualidade do lead." };
+    }
+
+    function buildSpecialistAssessment(input) {
+      const multiChannel = input.callsCount > 0 && input.emailsCount > 0;
+      const hasCommercialDisinterestMatch = input.hasDocumentedDisinterest || input.hasImplicitDisinterestSignal || input.hasQualificationGapSignal || input.hasResolvedNeedSignal;
+      const hasRealObjection = hasCommercialDisinterestMatch || input.hasDocumentedFakeSignal || input.hasAccidentalSignupSignal;
+      const supportedStrong = input.isSemContato
+        ? input.hasCadenceEvidence && input.hasDocumentedNoContact && (input.noContactCadence.sufficientCadence || input.hasStrongCadenceEvidence) && !input.hasDocumentedConversation
+        : input.isSemInteresse
+          ? hasCommercialDisinterestMatch || input.hasAccidentalSignupSignal
+          : input.isFake
+            ? input.hasDocumentedFakeSignal || input.hasAccidentalSignupSignal
+            : !input.warnings.some(w => w.type === "critical") && (input.summaryObjective || input.hasCadenceEvidence);
+      const contradiction = (input.isSemContato && input.hasDocumentedConversation && !input.hasDocumentedNoContact)
+        || (input.isSemInteresse && input.hasDocumentedNoContact && !hasCommercialDisinterestMatch && !input.hasDocumentedConversation && !input.hasConnectedCallMark)
+        || (input.isFake && !input.hasDocumentedFakeSignal && !input.hasAccidentalSignupSignal && (input.hasConnectedCallMark || input.mql.tone === "strong"));
+      const reasonMismatch = (input.isSemInteresse && (input.hasAccidentalSignupSignal || input.hasDocumentedFakeSignal))
+        || (input.isFake && input.hasAccidentalSignupSignal);
+      const supportedPartial = !contradiction && !supportedStrong && (
+        (input.isSemContato && input.hasCadenceEvidence)
+        || (input.isSemInteresse && (input.hasCadenceEvidence || input.hasDocumentedConversation || input.hasDocumentedNoContact))
+        || (input.isFake && (input.hasCadenceEvidence || input.mql.tone !== "unknown"))
+        || (!input.isSemContato && !input.isSemInteresse && !input.isFake && (input.summaryObjective || input.hasCadenceEvidence))
+      );
+      const strongPotential = input.mql.tone === "strong" && !input.hasDocumentedFakeSignal && !input.hasAccidentalSignupSignal && !input.hasQualificationGapSignal;
+      const mediumPotential = !strongPotential && ["strong", "moderate"].includes(input.mql.tone) && !input.hasDocumentedFakeSignal && !input.hasAccidentalSignupSignal;
+      const discardedTooEarly = input.cycleDays !== null && input.cycleDays <= 1 && (!input.noContactCadence.sufficientCadence || !input.hasCadenceEvidence);
+      const cadenceTooLight = input.isSemContato && input.hasCadenceEvidence && !input.noContactCadence.sufficientCadence;
+      const lacksObjectionExploration = input.isSemInteresse && !hasRealObjection && !input.hasConnectedCallMark && !input.hasDocumentedConversation;
+      const poorExecution = (!input.hasCadenceEvidence && !hasRealObjection && !input.hasDocumentedConversation) || discardedTooEarly || cadenceTooLight || lacksObjectionExploration;
+      const goodExecution = !discardedTooEarly && (
+        supportedStrong
+        || multiChannel
+        || input.hasConnectedCallMark
+        || (input.isSemInteresse && (input.hasDocumentedConversation || hasRealObjection))
+      );
+
+      let classification = "Descarte Duvidoso";
+      if (strongPotential && (contradiction || poorExecution || !supportedStrong && !supportedPartial)) classification = "Oportunidade Perdida";
+      else if (supportedStrong && !contradiction && !poorExecution) classification = "Descarte Correto";
+      else if (!supportedStrong && !supportedPartial && strongPotential) classification = "Oportunidade Perdida";
+
+      const styles = getAssessmentStyle(classification);
+
+      const leadDataBits = [
+        countLabel(input.contacts, "tentativa", "tentativas"),
+        countLabel(input.callsCount, "ligação", "ligações"),
+        countLabel(input.emailsCount, "e-mail", "e-mails"),
+        countLabel(input.connectedCount, "interação marcada", "interações marcadas")
+      ];
+      const historyText = input.hasCadenceEvidence
+        ? `O histórico mostra ${joinNatural(leadDataBits)} no CRM.`
+        : "O histórico não mostra tentativa registrada no CRM.";
+      const cycleText = input.cycleDays == null
+        ? "O ciclo entre entrada e descarte não está claro no export."
+        : `O caso ficou aberto por ${countLabel(input.cycleDays, "dia", "dias")} até o descarte.`;
+      const responseText = hasRealObjection
+        ? input.hasResolvedNeedSignal
+          ? "Há contexto objetivo de que a necessidade já estava resolvida."
+          : input.hasQualificationGapSignal
+            ? "Há contexto objetivo de falta de fit, prioridade, orçamento ou perfil."
+            : input.hasImplicitDisinterestSignal
+              ? "O comentário mostra avanço comercial inicial e depois sumiço ou perda de retorno, o que é compatível com desinteresse prático."
+            : input.hasAccidentalSignupSignal
+              ? "Há indicação clara de cadastro acidental ou interesse não intencional."
+              : input.hasDocumentedFakeSignal
+                ? "Há indicação objetiva de inconsistência no cadastro."
+                : "Há resposta ou objeção real registrada no comentário."
+        : input.hasDocumentedNoContact
+          ? "O comentário registra ausência de resposta do lead."
+          : input.hasDocumentedConversation
+            ? "Há sinal de conversa, mas sem objeção real claramente registrada."
+            : "Não há resposta explícita nem objeção real bem documentada.";
+      const leadContextText = input.mql.basisText
+        ? `Nos dados do lead aparecem ${input.mql.basisText}.`
+        : "Os dados do lead são limitados no export.";
+      const caseRead = `${historyText} ${cycleText} O motivo registrado foi "${input.reason || "Sem motivo"}". ${responseText} ${leadContextText}`;
+
+      let discardValidation = "";
+      if (contradiction) {
+        if (input.isSemContato) discardValidation = "O motivo do descarte não se sustenta porque o histórico indica que houve contato ou retorno do lead, então classificar como \"Não houve contato\" contradiz o próprio CRM.";
+        else if (input.isSemInteresse) discardValidation = "O motivo registrado fica inconsistente porque o comentário fala mais em ausência de retorno do que em desinteresse propriamente dito; aqui o motivo não casa bem com o histórico.";
+        else if (input.isFake) discardValidation = "O motivo \"Fake\" não se sustenta com segurança porque faltam provas objetivas de dado inválido e ainda existem sinais válidos no cadastro.";
+        else discardValidation = "O motivo registrado entra em contradição com o histórico visível e precisa ser revisto.";
+      } else if (supportedStrong) {
+        if (input.isSemContato) discardValidation = "O motivo do descarte se sustenta porque há cadência suficiente registrada e o comentário confirma ausência de retorno, sem indício de conversa efetiva.";
+        else if (input.isSemInteresse) {
+          if (input.hasResolvedNeedSignal) discardValidation = "O descarte se sustenta, embora o motivo esteja genérico: o comentário aponta necessidade já resolvida, então o problema parece mais de timing do que de leitura errada.";
+          else if (input.hasQualificationGapSignal) discardValidation = "O descarte se sustenta porque o histórico traz falta de fit comercial ou prioridade. O único ponto é que o motivo poderia estar mais específico no CRM.";
+          else if (input.hasImplicitDisinterestSignal) discardValidation = "O motivo do descarte se sustenta porque o comentário casa com \"Sem interesse\": houve avanço inicial, mas depois o lead sumiu, deixou de atender ou de responder, o que na prática mostra perda de interesse ou prioridade.";
+          else if (input.hasAccidentalSignupSignal) discardValidation = "O descarte se sustenta porque o comentário mostra cadastro por engano ou preenchimento errado. O ponto de atenção é que isso casa mais com erro de origem do lead do que com \"Sem interesse\".";
+          else discardValidation = "O motivo do descarte se sustenta porque o comentário registra objeção real ou contexto objetivo de desinteresse.";
+        } else if (input.isFake) {
+          discardValidation = input.hasAccidentalSignupSignal
+            ? "O histórico mostra engano de cadastro; o descarte faz sentido, mas o motivo ideal seria algo mais ligado à origem do lead do que propriamente \"Fake\"."
+            : "O motivo do descarte se sustenta porque o histórico traz evidência objetiva de cadastro inconsistente ou dado inválido.";
+        } else {
+          discardValidation = "O motivo registrado está compatível com o histórico disponível e não mostra contradição relevante.";
+        }
+      } else if (supportedPartial) {
+        if (input.isSemContato) discardValidation = "O motivo conversa com o histórico, mas ainda está fraco: existe alguma tentativa registrada, porém a cadência e a documentação ainda não são suficientes para sustentar o encerramento com segurança.";
+        else if (input.isSemInteresse) discardValidation = "O motivo conversa parcialmente com o comentário, mas ainda falta deixar mais claro se houve desinteresse, perda de timing ou só ausência de retorno. O encaixe entre motivo e anotação ainda não está fechado.";
+        else if (input.isFake) discardValidation = "O motivo pede documentação melhor. Sem prova objetiva de dado inválido, chamar o lead de \"Fake\" fica arriscado.";
+        else discardValidation = "O motivo registrado não está totalmente errado, mas segue superficial e pouco documentado para fechar a análise com segurança.";
+      } else {
+        discardValidation = !input.hasCadenceEvidence
+          ? `O motivo do descarte não se sustenta porque o CRM não mostra tentativa registrada para "${input.reason || "esse motivo"}".`
+          : "O motivo do descarte ficou fraco porque o histórico não entrega base suficiente para confirmar que a leitura da equipe estava correta.";
+      }
+      if (reasonMismatch && input.isSemInteresse) discardValidation += " O descarte pode até fazer sentido, mas o comentário não casa exatamente com esse motivo e sugere revisar a etiqueta usada no CRM.";
+      if (input.summaryWeak && !supportedStrong) discardValidation += " O comentário também está curto ou pouco objetivo, o que enfraquece a justificativa.";
+
+      let potentialText = "";
+      if (input.hasDocumentedFakeSignal || input.hasAccidentalSignupSignal) potentialText = "Comercialmente, este caso parece pouco aproveitável porque o problema está na origem do cadastro, não em uma oportunidade real bem formada.";
+      else if (input.hasQualificationGapSignal) potentialText = "Comercialmente, o histórico aponta mais falta de fit do que falta de timing, porque o lead parece fora do recorte, do perfil ou da prioridade.";
+      else if (input.hasResolvedNeedSignal && strongPotential) potentialText = "Comercialmente, havia perfil, mas o caso aponta mais perda de timing do que falta de fit, já que a necessidade aparentemente já estava encerrada.";
+      else if (strongPotential) potentialText = "Comercialmente, o lead tinha sinais claros de potencial e aderência ao perfil.";
+      else if (mediumPotential) potentialText = "Comercialmente, o lead tinha potencial parcial, mas com lacunas que pediam validação adicional.";
+      else potentialText = "Comercialmente, o lead já aparecia com aderência limitada, o que reduz a chance de ser uma oportunidade forte.";
+
+      let executionText = "";
+      if ((!input.hasCadenceEvidence && !hasRealObjection && !input.hasDocumentedConversation) || discardedTooEarly) {
+        executionText = discardedTooEarly
+          ? "Na condução comercial, o descarte aconteceu cedo demais para separar falta de interesse de falta de insistência."
+          : "Na condução comercial, houve falha da equipe porque não existe tentativa mínima registrada antes do descarte.";
+      } else if (cadenceTooLight) {
+        executionText = `Na condução comercial, houve alguma insistência, mas ela ainda foi leve para encerrar com segurança${multiChannel ? "" : " e a abordagem nem aparece distribuída em mais de um canal"}.`;
+      } else if (lacksObjectionExploration) {
+        executionText = "Na condução comercial, faltou explorar e documentar a objeção real; o histórico mostra esforço, mas não comprova por que o lead foi tratado como sem interesse.";
+      } else if (goodExecution) {
+        executionText = input.isSemContato
+          ? `Na condução comercial, houve insistência suficiente${multiChannel ? " e abordagem multicanal" : ""}, então não aparece falha relevante da equipe.`
+          : hasRealObjection
+            ? "Na condução comercial, a objeção ficou registrada de forma suficientemente objetiva, sem sinal claro de erro de execução."
+            : "Na condução comercial, não aparece falha relevante da equipe com base no histórico disponível.";
+      } else {
+        executionText = "Na condução comercial, houve algum trabalho, mas a profundidade ainda não é suficiente para afirmar que o descarte foi conduzido da melhor forma.";
+      }
+      const commercialRead = `${potentialText} ${executionText}`;
+
+      let conclusion = "";
+      if (classification === "Descarte Correto") {
+        if (input.hasDocumentedFakeSignal || input.hasAccidentalSignupSignal || input.hasQualificationGapSignal) conclusion = "Descarte Correto, porque o histórico sustenta o encerramento e o caso parece mais problema de origem ou fit do que oportunidade mal perdida.";
+        else if (input.hasResolvedNeedSignal || (strongPotential && input.isSemContato)) conclusion = "Descarte Correto, porque o histórico sustenta o encerramento mesmo com algum potencial comercial. Aqui pesa mais timing ou baixa prioridade do lead do que falha da equipe.";
+        else conclusion = "Descarte Correto, porque o motivo informado está respaldado pelo histórico e a condução comercial não mostra falha relevante.";
+      } else if (classification === "Oportunidade Perdida") {
+        conclusion = "Oportunidade Perdida, porque havia sinais de potencial e o descarte parece precipitado, mal interpretado ou mal conduzido diante do que ficou registrado no CRM.";
+      } else {
+        conclusion = "Descarte Duvidoso, porque o histórico ainda deixa lacunas importantes: o motivo até pode fazer sentido, mas está fraco, superficial ou mal documentado para fechar o caso com convicção.";
+      }
+
+      let nextAction = "";
+      if (classification === "Descarte Correto") {
+        if (input.hasResolvedNeedSignal || (strongPotential && input.isSemContato)) nextAction = "Nutrir ou reciclar o lead para uma nova janela, sem tratar este caso como erro de descarte.";
+        else if (reasonMismatch && input.isSemInteresse) nextAction = "Manter descartado, mas ajustar o motivo no CRM para refletir melhor o comentário registrado.";
+        else if (input.hasQualificationGapSignal || input.hasAccidentalSignupSignal || input.hasDocumentedFakeSignal) nextAction = "Manter descartado e revisar a origem, o formulário ou o critério de qualificação desse tipo de lead.";
+        else nextAction = "Manter descartado e preservar o contexto objetivo no CRM.";
+      } else if (classification === "Descarte Duvidoso") {
+        if (contradiction) nextAction = "Reclassificar o motivo no CRM e revisar o caso antes de encerrar definitivamente.";
+        else if (input.isSemContato) nextAction = "Alongar a cadência com pelo menos mais um canal antes de confirmar o descarte.";
+        else nextAction = "Reabrir a análise, registrar melhor a objeção e só depois decidir entre reciclagem ou descarte.";
+      } else {
+        nextAction = strongPotential
+          ? "Reabrir a abordagem rapidamente com cadência multicanal, diagnóstico de objeção e registro claro da próxima conversa."
+          : "Reciclar o lead e validar novamente fit, timing e objeção antes de um novo descarte.";
+      }
+
+      return {
+        tone: styles.tone,
+        panelCls: styles.panelCls,
+        badgeCls: styles.badgeCls,
+        classification,
+        caseRead,
+        discardValidation,
+        commercialRead,
+        conclusion,
+        nextAction
+      };
+    }
+
+    function assessMql(row) {
+      const email = extractEmail(row.contactDetail);
+      const contactName = extractContactName(row.contactDetail);
+      const corporateEmail = email && !isFreeEmail(email);
+      const declaredAsMql = /\bmql\b/.test(normalize(row.leadType));
+      const hasSeniorTitle = /(c level|c-level|diretor|diretora|gerente|coordenador|head|socio|socia|proprietario|proprietaria|owner|founder|ceo|cto|cfo|coo)/i.test(normalize(row.title));
+      let score = 0;
+      const evidence = [];
+      const gaps = [];
+
+      if (declaredAsMql) {
+        score += 1;
+        evidence.push(`CRM classificou como "${row.leadType}"`);
+      } else if (String(row.leadType || "").trim()) {
+        evidence.push(`tipo de lead informado: "${row.leadType}"`);
+      } else {
+        gaps.push("sem tipo de lead explícito no export");
+      }
+
+      if (row.company) { score += 1; evidence.push("empresa identificada"); } else gaps.push("sem empresa identificada");
+      if (contactName) { score += 1; evidence.push("contato nomeado"); } else gaps.push("sem contato nomeado");
+      if (corporateEmail) { score += 1; evidence.push("e-mail corporativo"); }
+      else if (email) { score += 0.5; evidence.push("e-mail pessoal"); }
+      else gaps.push("sem e-mail");
+      if (row.phone) { score += 1; evidence.push("telefone cadastrado"); } else gaps.push("sem telefone");
+      if (row.title) {
+        score += hasSeniorTitle ? 1 : 0.5;
+        evidence.push(hasSeniorTitle ? `cargo com senioridade (${row.title})` : `cargo informado (${row.title})`);
+      } else gaps.push("sem cargo");
+
+      let tone = "unknown";
+      let label = "Base insuficiente para afirmar MQL";
+      if (declaredAsMql && score >= 5) { tone = "strong"; label = "MQL com boa aderência"; }
+      else if (declaredAsMql && score >= 3.5) { tone = "moderate"; label = "MQL declarado, mas precisa validação"; }
+      else if (declaredAsMql) { tone = "weak"; label = "MQL declarado com base fraca"; }
+      else if (score >= 4) { tone = "strong"; label = "Boa aderência a MQL"; }
+      else if (score >= 2.5) { tone = "moderate"; label = "Aderência parcial a MQL"; }
+      else if (score > 0) { tone = "weak"; label = "Baixa aderência a MQL"; }
+
+      const clsMap = {
+        strong: "text-teal-700 bg-teal-50 border-teal-200",
+        moderate: "text-amber-700 bg-amber-50 border-amber-200",
+        weak: "text-rose-700 bg-rose-50 border-rose-200",
+        unknown: "text-slate-700 bg-slate-50 border-slate-200"
+      };
+
+      return {
+        label,
+        tone,
+        cls: clsMap[tone] || clsMap.unknown,
+        basisText: [...evidence.slice(0, 4), ...gaps.slice(0, 2)].join("; ")
+      };
+    }
+
+    function evaluate(row) {
+      const reasonNorm = normalize(row.reason);
+      const callsCount = countCallEvents(row.calls);
+      const connectedCount = countConnectedMarkers(row.calls);
+      const emailsCount = countEmailEvents(row.emails);
+      const cadenceEvidenceText = buildCadenceEvidenceText({ contacts: row.contacts, callsCount, connectedCount, emailsCount });
+      const cycleDays = diffDays(row.createdAt, row.closedAt);
+      const isSemContato = reasonNorm.includes("nao houve contato") || reasonNorm.includes("sem contato");
+      const isSemInteresse = reasonNorm.includes("sem interesse");
+      const isFake = reasonNorm.includes("fake");
+      const isDecisionMaker = /(diretor|socio|sócio|c-level|ceo|cto|cfo|coo|head|founder|owner)/i.test(row.title || "");
+      const hasCadenceEvidence = row.contacts > 0 || callsCount > 0 || emailsCount > 0;
+      const hasDocumentedNoContact = hasExplicitNoContactSignal(row.summary);
+      const hasDocumentedDisinterest = hasExplicitDisinterestSignal(row.summary);
+      const hasImplicitDropoffDisinterest = hasImplicitDisinterestSignal(row.summary);
+      const hasDocumentedFakeSignal = hasExplicitFakeSignal(row.summary);
+      const hasDocumentedConversation = hasExplicitConversationSignal(row.summary);
+      const hasAccidentalSignupSignal = hasExplicitAccidentalSignupSignal(row.summary);
+      const hasResolvedNeedSignal = hasExplicitResolvedNeedSignal(row.summary);
+      const hasQualificationGapSignal = hasExplicitQualificationGapSignal(row.summary);
+      const noContactCadence = evaluateNoContactCadence({ contacts: row.contacts, callsCount, emailsCount, summary: row.summary });
+      const hasStrongCadenceEvidence = noContactCadence.level === "strong";
+      const summaryObjective = hasDocumentedNoContact || hasDocumentedDisinterest || hasImplicitDropoffDisinterest || hasDocumentedFakeSignal || hasDocumentedConversation || hasAccidentalSignupSignal || hasResolvedNeedSignal || hasQualificationGapSignal;
+      const summaryWeak = !summaryObjective && isSummaryWeak(row.summary, reasonNorm);
+      const mql = assessMql(row);
+
+      const marketFit = buildMarketFitAssessment({
+        mql,
+        isSemContato,
+        isSemInteresse,
+        hasStrongCadenceEvidence,
+        hasDocumentedNoContact,
+        hasDocumentedDisinterest,
+        hasImplicitDisinterestSignal: hasImplicitDropoffDisinterest,
+        hasDocumentedFakeSignal,
+        hasAccidentalSignupSignal,
+        hasResolvedNeedSignal,
+        hasQualificationGapSignal
+      });
+
+      const warnings = [];
+
+      if (isSemInteresse) {
+        if (!hasCadenceEvidence && !summaryObjective) warnings.push({ type: "critical", title: "Descarte sem base registrada", desc: `O motivo "${row.reason}" não se sustenta porque não há tentativa nem contexto objetivo registrado no CRM. ${cadenceEvidenceText}` });
+        else if (!hasAccidentalSignupSignal && !hasResolvedNeedSignal && !hasQualificationGapSignal && !hasDocumentedDisinterest && !hasImplicitDropoffDisinterest && !hasDocumentedNoContact && !hasDocumentedConversation && connectedCount === 0 && summaryWeak && mql.tone === "strong") warnings.push({ type: "warning", title: "Motivo pouco sustentado", desc: `O motivo "${row.reason}" ficou fraco porque o CRM não traz objeção clara nem contexto objetivo suficiente para sustentá-lo. ${cadenceEvidenceText}` });
+        if (isDecisionMaker && (connectedCount > 0 || hasDocumentedConversation) && summaryWeak) warnings.push({ type: "warning", title: "Objeção do decisor pouco documentada", desc: `Houve perda com perfil decisor, mas a objeção central não ficou claramente registrada no CRM. Resumo atual: "${row.summary || "vazio"}".` });
+      }
+
+      if (isSemContato) {
+        if (!hasCadenceEvidence) warnings.push({ type: "critical", title: "Descarte sem base registrada", desc: `O motivo "${row.reason}" não se sustenta porque não há tentativa visível no CRM. ${cadenceEvidenceText}` });
+        else if (hasDocumentedConversation && !hasDocumentedNoContact) warnings.push({ type: "critical", title: "Motivo contradiz o histórico", desc: `O comentário registra retorno ou conversa. Nesse cenário, "${row.reason}" deixa de ser coerente.` });
+        else if (hasDocumentedNoContact && !noContactCadence.sufficientCadence) warnings.push({ type: "warning", title: "Cadência ainda leve para encerramento", desc: `O comentário sustenta ausência de retorno, mas a cadência ainda parece curta para encerrar a oportunidade com segurança. ${cadenceEvidenceText}` });
+        else if (cycleDays === 0 && !noContactCadence.sufficientCadence) warnings.push({ type: "warning", title: "Descarte no mesmo dia", desc: `O descarte aconteceu no mesmo dia da entrada (${formatDateBR(row.createdAt)}) e ficou sem tempo ou cadência suficiente para se sustentar.` });
+      }
+
+      if (isFake) {
+        const fakeSignals = [];
+        if (connectedCount > 0) fakeSignals.push(`${connectedCount} interação(ões) marcada(s)`);
+        if (extractEmail(row.contactDetail) && !isFreeEmail(extractEmail(row.contactDetail))) fakeSignals.push("e-mail corporativo");
+        if (row.phone) fakeSignals.push("telefone cadastrado");
+        if (row.title) fakeSignals.push(`cargo informado (${row.title})`);
+        if (!hasAccidentalSignupSignal && !hasDocumentedFakeSignal && (summaryWeak || !row.summary) && (connectedCount > 0 || fakeSignals.length >= 2)) warnings.push({ type: "warning", title: "Motivo \"Fake\" pede prova objetiva", desc: `O motivo "Fake" ficou fraco porque o cadastro ainda mostra sinais válidos e falta prova objetiva de dado inconsistente. ${fakeSignals.length ? `Sinais atuais: ${fakeSignals.join(", ")}.` : ""}` });
+      }
+
+      const dedupedWarnings = warnings.filter((warning, index, list) => list.findIndex(item => item.title === warning.title && item.desc === warning.desc) === index);
+      const specialist = buildSpecialistAssessment({
+        reason: row.reason,
+        mql,
+        isSemContato,
+        isSemInteresse,
+        isFake,
+        hasCadenceEvidence,
+        hasStrongCadenceEvidence,
+        hasConnectedCallMark: connectedCount > 0,
+        hasDocumentedNoContact,
+        hasDocumentedDisinterest,
+        hasImplicitDisinterestSignal: hasImplicitDropoffDisinterest,
+        hasDocumentedFakeSignal,
+        hasDocumentedConversation,
+        hasAccidentalSignupSignal,
+        hasResolvedNeedSignal,
+        hasQualificationGapSignal,
+        noContactCadence,
+        callsCount,
+        emailsCount,
+        connectedCount,
+        contacts: row.contacts,
+        cycleDays,
+        summaryWeak,
+        summaryObjective,
+        warnings: dedupedWarnings
+      });
+
+      return {
+        ...row,
+        callsCount,
+        emailsCount,
+        connectedCount,
+        cadenceEvidenceText,
+        channelEvidence: buildChannelMixText({ callsCount, emailsCount }),
+        cycleDays,
+        warnings: dedupedWarnings,
+        hasWarning: dedupedWarnings.length > 0,
+        mql,
+        marketFit,
+        specialist
+      };
+    }
+
+    function dedupe(rows) {
+      const map = new Map();
+      rows.forEach((row) => {
+        const fallbackKey = [normalize(row.company), normalize(extractEmail(row.contactDetail)), normalize(row.seller), normalize(row.reason)].join("|");
+        const key = row.enterpriseId ? `id|${normalize(row.enterpriseId)}` : `fallback|${fallbackKey}`;
+        if (!map.has(key)) {
+          map.set(key, { ...row, sourceFiles: [row.sourceFile].filter(Boolean) });
+          return;
+        }
+
+        const current = map.get(key);
+        map.set(key, {
+          ...current,
+          seller: String(current.seller || "").length >= String(row.seller || "").length ? current.seller : row.seller,
+          company: String(current.company || "").length >= String(row.company || "").length ? current.company : row.company,
+          reason: String(current.reason || "").length >= String(row.reason || "").length ? current.reason : row.reason,
+          summary: String(current.summary || "").length >= String(row.summary || "").length ? current.summary : row.summary,
+          contacts: Math.max(current.contacts || 0, row.contacts || 0),
+          calls: mergeUniqueText(current.calls, row.calls, /\s+\|\s+|;/),
+          contactDetail: String(current.contactDetail || "").length >= String(row.contactDetail || "").length ? current.contactDetail : row.contactDetail,
+          title: String(current.title || "").length >= String(row.title || "").length ? current.title : row.title,
+          createdAt: String(current.createdAt || "").trim() || String(row.createdAt || "").trim(),
+          closedAt: String(current.closedAt || "").length >= String(row.closedAt || "").length ? current.closedAt : row.closedAt,
+          emails: mergeUniqueText(current.emails, row.emails, ";"),
+          enterpriseId: String(current.enterpriseId || "").trim() || String(row.enterpriseId || "").trim(),
+          phone: String(current.phone || "").trim() || String(row.phone || "").trim(),
+          leadType: String(current.leadType || "").length >= String(row.leadType || "").length ? current.leadType : row.leadType,
+          sourceFiles: Array.from(new Set([...(current.sourceFiles || []), row.sourceFile].filter(Boolean)))
+        });
+      });
+      return Array.from(map.values()).map(row => ({ ...row, sourceFile: (row.sourceFiles || []).join(" / ") }));
+    }
+
+    async function readFiles(files) {
+      const chunks = await Promise.all(Array.from(files).map(file => new Promise((resolve, reject) => {
+        const ext = file.name.split(".").pop().toLowerCase();
+        if (ext === "csv") {
+          Papa.parse(file, {
+            header: true,
+            skipEmptyLines: true,
+            complete: ({ data }) => resolve(data.map(row => ({ ...row, __source: file.name }))),
+            error: reject
+          });
+          return;
+        }
+        if (ext === "xlsx" || ext === "xls") {
+          const reader = new FileReader();
+          reader.onload = (e) => {
+            try {
+              const workbook = XLSX.read(new Uint8Array(e.target.result), { type: "array", cellDates: true });
+              const data = [];
+              workbook.SheetNames.forEach(sheet => {
+                XLSX.utils.sheet_to_json(workbook.Sheets[sheet], { defval: "", raw: false }).forEach(row => data.push({ ...row, __source: `${file.name} (Aba: ${sheet})` }));
+              });
+              resolve(data);
+            } catch (err) { reject(err); }
+          };
+          reader.readAsArrayBuffer(file);
+          return;
+        }
+        resolve([]);
+      })));
+
+      const flat = chunks.flat().map(row => ({
+        seller: pick(row, FIELDS.seller) || "Sem proprietário",
+        company: pick(row, FIELDS.company) || "Sem nome",
+        reason: pick(row, FIELDS.reason),
+        summary: pick(row, FIELDS.summary),
+        contacts: intSafe(pick(row, FIELDS.contacts)),
+        calls: pick(row, FIELDS.calls),
+        contactDetail: pick(row, FIELDS.contactDetail),
+        title: pick(row, FIELDS.title),
+        createdAt: pick(row, FIELDS.createdAt),
+        closedAt: pick(row, FIELDS.closedAt),
+        emails: pick(row, FIELDS.emails),
+        enterpriseId: pick(row, FIELDS.enterpriseId),
+        phone: pick(row, FIELDS.phone),
+        leadType: pick(row, FIELDS.leadType),
+        sourceFile: row.__source || ""
+      })).filter(row => row.company !== "Sem nome" || row.enterpriseId || row.reason || row.contactDetail);
+
+      return dedupe(flat).map(evaluate);
+    }
+
+    function exportPdf(rows) {
+      if (!rows.length) return;
+      const { jsPDF } = window.jspdf;
+      const doc = new jsPDF({ orientation: "landscape", unit: "pt", format: "a4" });
+      const pageWidth = doc.internal.pageSize.getWidth();
+      const pageHeight = doc.internal.pageSize.getHeight();
+      const margin = 32;
+      const contentWidth = pageWidth - margin * 2;
+      const generatedAt = new Date().toLocaleString("pt-BR");
+      const correct = rows.filter(item => item.specialist.classification === "Descarte Correto").length;
+      const doubtful = rows.filter(item => item.specialist.classification === "Descarte Duvidoso").length;
+      const lost = rows.filter(item => item.specialist.classification === "Oportunidade Perdida").length;
+      const alertNotes = rows.reduce((acc, item) => acc + item.warnings.length, 0);
+      const statusRank = { "Oportunidade Perdida": 0, "Descarte Duvidoso": 1, "Descarte Correto": 2 };
+      const sortedRows = [...rows].sort((a, b) => {
+        const byStatus = (statusRank[a.specialist.classification] ?? 9) - (statusRank[b.specialist.classification] ?? 9);
+        if (byStatus !== 0) return byStatus;
+        const byWarnings = b.warnings.length - a.warnings.length;
+        if (byWarnings !== 0) return byWarnings;
+        return b.contacts - a.contacts;
+      });
+      const truncateText = (value, max) => {
+        const clean = String(value || "").replace(/\s+/g, " ").trim();
+        if (!clean) return "";
+        return clean.length > max ? `${clean.slice(0, max - 1).trim()}...` : clean;
+      };
+      const getPdfStatusStyle = (classification) => {
+        if (classification === "Oportunidade Perdida") return { fill: [255, 241, 242], text: [190, 24, 93], stroke: [251, 113, 133] };
+        if (classification === "Descarte Duvidoso") return { fill: [255, 251, 235], text: [180, 83, 9], stroke: [251, 191, 36] };
+        return { fill: [240, 253, 250], text: [13, 148, 136], stroke: [45, 212, 191] };
+      };
+      const drawStatCard = (x, y, w, h, label, value, valueColor, cardFill) => {
+        doc.setFillColor(...cardFill);
+        doc.setDrawColor(226, 232, 240);
+        doc.roundedRect(x, y, w, h, 18, 18, "FD");
+        doc.setFont("helvetica", "bold");
+        doc.setFontSize(8.5);
+        doc.setTextColor(100, 116, 139);
+        doc.text(label, x + 16, y + 20);
+        doc.setFontSize(24);
+        doc.setTextColor(...valueColor);
+        doc.text(String(value), x + 16, y + 50);
+      };
+      const actionCounts = sortedRows.reduce((acc, item) => {
+        const action = String(item.specialist.nextAction || "").trim();
+        if (action) acc[action] = (acc[action] || 0) + 1;
+        return acc;
+      }, {});
+      const topActions = Object.entries(actionCounts)
+        .sort((a, b) => b[1] - a[1])
+        .slice(0, 3)
+        .map(([action, count]) => [truncateText(action, 110), count]);
+      const actionLineCount = topActions.length
+        ? topActions.reduce((acc, [action]) => acc + Math.max(1, doc.splitTextToSize(action, contentWidth - 110).length), 0)
+        : 1;
+      const actionsY = margin + 204;
+      const actionsH = Math.max(98, 60 + actionLineCount * 11 + Math.max(0, topActions.length - 1) * 8);
+      let priorityCases = sortedRows.filter(item => item.specialist.classification !== "Descarte Correto" || item.warnings.length).slice(0, 3);
+      const casesY = actionsY + actionsH + 16;
+      const casesH = priorityCases.length ? 62 + priorityCases.length * 36 : 96;
+
+      doc.setFillColor(248, 250, 252);
+      doc.rect(0, 0, pageWidth, pageHeight, "F");
+
+      doc.setFillColor(15, 23, 42);
+      doc.roundedRect(margin, margin, contentWidth, 92, 24, 24, "F");
+      doc.setFillColor(45, 212, 191);
+      doc.roundedRect(pageWidth - margin - 180, margin + 16, 148, 12, 6, 6, "F");
+      doc.setFont("helvetica", "bold");
+      doc.setFontSize(10);
+      doc.setTextColor(94, 234, 212);
+      doc.text("RELATÓRIO EXECUTIVO", margin + 24, margin + 28);
+      doc.setFontSize(22);
+      doc.setTextColor(255, 255, 255);
+      doc.text("Auditoria de descartes comerciais", margin + 24, margin + 56);
+      doc.setFont("helvetica", "normal");
+      doc.setFontSize(10);
+      doc.setTextColor(191, 219, 254);
+      doc.text(`Base analisada: ${rows.length} oportunidades`, margin + 24, margin + 76);
+      doc.text(`Gerado em ${generatedAt}`, pageWidth - margin - 24, margin + 76, { align: "right" });
+
+      const statsY = margin + 112;
+      const statsGap = 10;
+      const statsWidth = (contentWidth - statsGap * 3) / 4;
+      drawStatCard(margin, statsY, statsWidth, 74, "Descartes corretos", correct, [13, 148, 136], [255, 255, 255]);
+      drawStatCard(margin + (statsWidth + statsGap), statsY, statsWidth, 74, "Descartes duvidosos", doubtful, [180, 83, 9], [255, 251, 235]);
+      drawStatCard(margin + (statsWidth + statsGap) * 2, statsY, statsWidth, 74, "Oportunidades perdidas", lost, [190, 24, 93], [255, 241, 242]);
+      drawStatCard(margin + (statsWidth + statsGap) * 3, statsY, statsWidth, 74, "Alertas complementares", alertNotes, [30, 41, 59], [241, 245, 249]);
+
+      doc.setFillColor(255, 251, 235);
+      doc.setDrawColor(253, 186, 116);
+      doc.roundedRect(margin, actionsY, contentWidth, actionsH, 20, 20, "FD");
+      doc.setFont("helvetica", "bold");
+      doc.setFontSize(9.5);
+      doc.setTextColor(146, 64, 14);
+      doc.text("ACIONAMENTOS PRIORITÁRIOS", margin + 18, actionsY + 22);
+      doc.setFontSize(14);
+      doc.setTextColor(51, 65, 85);
+      doc.text("O que deve ganhar destaque na operação", margin + 18, actionsY + 42);
+      if (!topActions.length) {
+        doc.setFont("helvetica", "normal");
+        doc.setFontSize(10);
+        doc.setTextColor(100, 116, 139);
+        doc.text("A base atual não trouxe acionamentos consolidados para destacar.", margin + 18, actionsY + 68);
+      } else {
+        let actionY = actionsY + 68;
+        topActions.forEach(([action, count]) => {
+          const lines = doc.splitTextToSize(action, contentWidth - 110);
+          doc.setFillColor(217, 119, 6);
+          doc.roundedRect(margin + 18, actionY - 11, 30, 18, 9, 9, "F");
+          doc.setFont("helvetica", "bold");
+          doc.setFontSize(9);
+          doc.setTextColor(255, 255, 255);
+          doc.text(String(count), margin + 33, actionY + 1, { align: "center" });
+          doc.setTextColor(51, 65, 85);
+          doc.setFontSize(10);
+          doc.text(lines, margin + 58, actionY + 1);
+          actionY += lines.length * 11 + 10;
+        });
+      }
+
+      doc.setFillColor(255, 255, 255);
+      doc.setDrawColor(226, 232, 240);
+      doc.roundedRect(margin, casesY, contentWidth, casesH, 20, 20, "FD");
+      doc.setFont("helvetica", "bold");
+      doc.setFontSize(9.5);
+      doc.setTextColor(71, 85, 105);
+      doc.text("CASOS PARA OLHAR PRIMEIRO", margin + 18, casesY + 22);
+      doc.setFontSize(14);
+      doc.setTextColor(15, 23, 42);
+      doc.text("Fila de revisão prioritária", margin + 18, casesY + 42);
+      if (!priorityCases.length) {
+        doc.setFont("helvetica", "normal");
+        doc.setFontSize(10);
+        doc.setTextColor(100, 116, 139);
+        doc.text("Nenhum caso com prioridade imediata apareceu na base filtrada.", margin + 18, casesY + 76);
+      } else {
+        priorityCases.forEach((item, index) => {
+          const rowTop = casesY + 58 + index * 36;
+          if (index) {
+            doc.setDrawColor(226, 232, 240);
+            doc.line(margin + 18, rowTop - 10, pageWidth - margin - 18, rowTop - 10);
+          }
+          const statusStyle = getPdfStatusStyle(item.specialist.classification);
+          const companyLabel = truncateText(`${item.enterpriseId ? `[${item.enterpriseId}] ` : ""}${item.company}`, 40);
+          const ownerLabel = truncateText(item.seller, 24);
+          const actionLabel = truncateText(item.specialist.nextAction || "Manter acompanhamento atual", 60);
+          const reasonLabel = truncateText(item.reason || "Sem motivo registrado", 42);
+          doc.setFont("helvetica", "bold");
+          doc.setFontSize(10);
+          doc.setTextColor(15, 23, 42);
+          doc.text(companyLabel, margin + 18, rowTop + 2);
+          doc.setFont("helvetica", "normal");
+          doc.setFontSize(8.5);
+          doc.setTextColor(100, 116, 139);
+          doc.text(ownerLabel, margin + 18, rowTop + 15);
+          doc.setFillColor(...statusStyle.fill);
+          doc.roundedRect(margin + 240, rowTop - 10, 132, 20, 10, 10, "F");
+          doc.setFont("helvetica", "bold");
+          doc.setFontSize(8.5);
+          doc.setTextColor(...statusStyle.text);
+          doc.text(item.specialist.classification, margin + 306, rowTop + 3, { align: "center" });
+          doc.setFont("helvetica", "bold");
+          doc.setTextColor(146, 64, 14);
+          doc.text(actionLabel, margin + 396, rowTop + 2);
+          doc.setFont("helvetica", "normal");
+          doc.setFontSize(8.5);
+          doc.setTextColor(100, 116, 139);
+          doc.text(reasonLabel, margin + 396, rowTop + 15);
+        });
+      }
+
+      doc.addPage();
+      const drawDetailPageHeader = () => {
+        doc.setFillColor(15, 23, 42);
+        doc.rect(0, 0, pageWidth, 56, "F");
+        doc.setFont("helvetica", "bold");
+        doc.setFontSize(14);
+        doc.setTextColor(255, 255, 255);
+        doc.text("Detalhamento por lead", margin, 24);
+        doc.setFont("helvetica", "normal");
+        doc.setFontSize(9);
+        doc.setTextColor(191, 219, 254);
+        doc.text("Leitura do histórico, motivo e anotação, classificação final, diagnóstico e acionamento recomendado.", margin, 42);
+        doc.text(`Leads exportados: ${sortedRows.length}`, pageWidth - margin, 24, { align: "right" });
+      };
+      doc.autoTable({
+        margin: { top: 74, right: margin, bottom: 28, left: margin },
+        head: [["Lead", "Responsável", "Motivo e anotação", "Classificação", "Diagnóstico da auditoria", "Acionamento"]],
+        body: sortedRows.map(item => {
+          const contactName = extractContactName(item.contactDetail) || "Contato não identificado";
+          const email = extractEmail(item.contactDetail);
+          const leadText = [
+            `${item.enterpriseId ? `[${item.enterpriseId}] ` : ""}${item.company || "Empresa não identificada"}`,
+            contactName,
+            email || item.title || ""
+          ].filter(Boolean).join("\n");
+          const ownerText = [
+            item.seller || "Sem responsável",
+            item.cycleDays == null ? "Ciclo: sem data" : `Ciclo: ${item.cycleDays} dia(s)`,
+            `Execução: ${item.contacts} total | ${item.callsCount} lig. | ${item.emailsCount} e-mails`
+          ].join("\n");
+          const reasonText = [
+            item.reason || "Sem motivo registrado",
+            `"${item.summary || "Sem comentário registrado no CRM."}"`
+          ].join("\n\n");
+          const diagnosisText = [
+            `Caso: ${item.specialist.caseRead}`,
+            `Validação: ${item.specialist.discardValidation}`,
+            `Leitura comercial: ${item.specialist.commercialRead}`,
+            `Conclusão: ${item.specialist.conclusion}`,
+            item.warnings.length ? `Alertas: ${item.warnings.map(w => w.title).join(", ")}` : ""
+          ].filter(Boolean).join("\n\n");
+          return [leadText, ownerText, reasonText, item.specialist.classification, diagnosisText, item.specialist.nextAction || "Manter acompanhamento atual"];
+        }),
+        theme: "grid",
+        styles: {
+          fontSize: 8.2,
+          cellPadding: 6,
+          overflow: "linebreak",
+          lineColor: [226, 232, 240],
+          lineWidth: 0.6,
+          textColor: [30, 41, 59],
+          valign: "top"
+        },
+        headStyles: {
+          fillColor: [15, 23, 42],
+          textColor: [255, 255, 255],
+          fontStyle: "bold",
+          fontSize: 8.4
+        },
+        alternateRowStyles: { fillColor: [248, 250, 252] },
+        columnStyles: {
+          0: { cellWidth: 118 },
+          1: { cellWidth: 92 },
+          2: { cellWidth: 160 },
+          3: { cellWidth: 92, fontStyle: "bold", halign: "center" },
+          4: { cellWidth: 220 },
+          5: { cellWidth: 96, fontStyle: "bold" }
+        },
+        didDrawPage: () => {
+          drawDetailPageHeader();
+        },
+        didParseCell: (data) => {
+          if (data.section === "body" && data.column.index === 3) {
+            const style = getPdfStatusStyle(data.cell.raw);
+            data.cell.styles.fillColor = style.fill;
+            data.cell.styles.textColor = style.text;
+            data.cell.styles.lineColor = style.stroke;
+            data.cell.styles.fontStyle = "bold";
+          }
+          if (data.section === "body" && data.column.index === 5) {
+            data.cell.styles.fillColor = [255, 247, 237];
+            data.cell.styles.textColor = [146, 64, 14];
+            data.cell.styles.lineColor = [253, 186, 116];
+            data.cell.styles.fontStyle = "bold";
+          }
+        }
+      });
+
+      const totalPages = doc.getNumberOfPages();
+      for (let page = 1; page <= totalPages; page++) {
+        doc.setPage(page);
+        doc.setDrawColor(226, 232, 240);
+        doc.line(margin, pageHeight - 20, pageWidth - margin, pageHeight - 20);
+        doc.setFont("helvetica", "normal");
+        doc.setFontSize(8.5);
+        doc.setTextColor(100, 116, 139);
+        doc.text(page === 1 ? "Visão executiva com prioridades e acionamentos" : "Detalhamento por lead e recomendação operacional", margin, pageHeight - 8);
+        doc.text(`Página ${page} de ${totalPages}`, pageWidth - margin, pageHeight - 8, { align: "right" });
+      }
+      doc.save("relatorio_auditoria_descartes_executivo.pdf");
+    }
+
+    function sellers(rows) { return ["Todos", ...Array.from(new Set(rows.map(i => i.seller))).sort()]; }
+    function reasons(rows) { return ["Todos", ...Array.from(new Set(rows.map(i => i.reason))).sort()]; }
+
+    function filteredRows() {
+      return state.rows.filter(item => {
+        const searchBase = [item.company, item.seller, item.enterpriseId, extractContactName(item.contactDetail), extractEmail(item.contactDetail)].join(" ").toLowerCase();
+        const search = !state.filters.search || searchBase.includes(state.filters.search.toLowerCase());
+        const seller = state.filters.seller === "Todos" || item.seller === state.filters.seller;
+        const reason = state.filters.reason === "Todos" || item.reason === state.filters.reason;
+        const status = state.filters.status === "Todos" || item.specialist.classification === state.filters.status;
+        return search && seller && reason && status;
+      });
+    }
+
+    function dashboardData() {
+      const base = state.dashSeller === "Todos" ? state.rows : state.rows.filter(item => item.seller === state.dashSeller);
+      const bySeller = {};
+      const byReason = {};
+      const byMql = {};
+      const byStatus = { "Descarte Correto": 0, "Descarte Duvidoso": 0, "Oportunidade Perdida": 0 };
+      base.forEach(item => {
+        if (!bySeller[item.seller]) bySeller[item.seller] = { total: 0, issues: 0, correct: 0, doubtful: 0, lost: 0 };
+        bySeller[item.seller].total++;
+        const classification = item.specialist.classification;
+        byStatus[classification] = (byStatus[classification] || 0) + 1;
+        if (classification === "Descarte Correto") bySeller[item.seller].correct++;
+        if (classification === "Descarte Duvidoso") {
+          bySeller[item.seller].issues++;
+          bySeller[item.seller].doubtful++;
+        }
+        if (classification === "Oportunidade Perdida") {
+          bySeller[item.seller].issues++;
+          bySeller[item.seller].lost++;
+        }
+        byReason[item.reason || "Motivo não informado"] = (byReason[item.reason || "Motivo não informado"] || 0) + 1;
+        byMql[item.mql.label] = (byMql[item.mql.label] || 0) + 1;
+      });
+      return {
+        total: base.length,
+        correct: base.filter(item => item.specialist.classification === "Descarte Correto").length,
+        doubtful: base.filter(item => item.specialist.classification === "Descarte Duvidoso").length,
+        lost: base.filter(item => item.specialist.classification === "Oportunidade Perdida").length,
+        bySeller: Object.entries(bySeller).map(([name, v]) => ({ name, ...v, rate: v.total ? v.issues / v.total : 0 })).sort((a,b) => b.issues - a.issues || b.total - a.total),
+        byReason: Object.entries(byReason).map(([name, count]) => ({ name, count })).sort((a,b) => b.count - a.count),
+        byMql: Object.entries(byMql).map(([name, count]) => ({ name, count })).sort((a,b) => b.count - a.count),
+        byStatus: Object.entries(byStatus).map(([name, count]) => ({ name, count })).sort((a,b) => b.count - a.count)
+      };
+    }
+
+    function renderUpload() {
+      return `
+        <div class="h-full flex items-center justify-center">
+          <div class="panel w-full max-w-2xl rounded-2xl p-12 text-center">
+            <div class="mb-6 flex justify-center"><div class="rounded-2xl bg-brand-50 p-4 text-brand-600 font-bold text-2xl">A</div></div>
+            <h1 class="mb-3 text-2xl font-bold text-slate-800">AuditoriaSales</h1>
+            <p class="mx-auto mb-10 max-w-lg text-sm leading-relaxed text-slate-500">Importe as exportações do CRM para auditar descartes, encontrar inconsistências e revisar a qualidade da base.</p>
+            <label class="block cursor-pointer rounded-xl border-2 border-dashed border-slate-200 p-12 hover:border-brand-400 hover:bg-slate-50/50">
+              <input id="fileUpload" type="file" accept=".csv,.xlsx,.xls" multiple class="hidden">
+              <div class="pointer-events-none">
+                <div class="mb-4 text-slate-400">Selecione ou arraste as planilhas aqui</div>
+                <div class="flex justify-center gap-2">
+                  <span class="rounded border border-slate-200 bg-slate-100 px-2.5 py-1 text-[10px] font-bold uppercase tracking-wider text-slate-500">.XLSX</span>
+                  <span class="rounded border border-slate-200 bg-slate-100 px-2.5 py-1 text-[10px] font-bold uppercase tracking-wider text-slate-500">.XLS</span>
+                  <span class="rounded border border-slate-200 bg-slate-100 px-2.5 py-1 text-[10px] font-bold uppercase tracking-wider text-slate-500">.CSV</span>
+                </div>
+              </div>
+            </label>
+          </div>
+        </div>
+      `;
+    }
+
+    function renderMetricCard(label, value, accent) {
+      return `<div class="panel rounded-xl p-5"><div class="text-xs font-bold uppercase tracking-widest text-slate-500">${label}</div><div class="mt-2 text-3xl font-black ${accent}">${value}</div></div>`;
+    }
+
+    function renderAssessmentSection(label, text, extraCls = "") {
+      if (!text) return "";
+      return `
+        <div class="overflow-hidden rounded-2xl border border-slate-200 bg-white shadow-sm ${extraCls}">
+          <div class="border-b border-slate-200 bg-slate-50 px-2.5 py-1 text-[10px] font-bold uppercase tracking-[0.16em] text-slate-600">${label}</div>
+          <div class="px-2.5 py-2 text-[12px] leading-5 text-slate-800">${text}</div>
+        </div>
+      `;
+    }
+
+    function renderLeadMetric(label, value, accent = "text-slate-900") {
+      return `
+        <div class="rounded-2xl border border-slate-200 bg-white px-2.5 py-1.5 shadow-sm">
+          <div class="text-[10px] font-bold uppercase tracking-[0.16em] text-slate-500">${label}</div>
+          <div class="mt-0.5 text-[14px] font-bold ${accent}">${value}</div>
+        </div>
+      `;
+    }
+
+    function renderActionSection(text, extraCls = "") {
+      if (!text) return "";
+      return `
+        <div class="overflow-hidden rounded-2xl border border-amber-300 bg-[linear-gradient(135deg,#fffbeb,#fff7ed)] shadow-sm ${extraCls}">
+          <div class="flex items-center justify-between border-b border-amber-200 bg-amber-100/80 px-2.5 py-1">
+            <div class="text-[10px] font-bold uppercase tracking-[0.16em] text-amber-900">Acionamento recomendado</div>
+            <div class="rounded-full bg-amber-500/10 px-2 py-0.5 text-[9px] font-bold uppercase tracking-[0.14em] text-amber-700">Prioridade operacional</div>
+          </div>
+          <div class="px-2.5 py-2.5 text-[12.5px] font-semibold leading-5 text-slate-900">${text}</div>
+        </div>
+      `;
+    }
+
+    function renderAuditLeadCard(lead) {
+      const contactName = extractContactName(lead.contactDetail) || "Contato não identificado";
+      const email = extractEmail(lead.contactDetail);
+      const marketStatus = lead.marketFit && lead.marketFit.status ? lead.marketFit.status : "Sem leitura comercial consolidada";
+      const marketDetail = lead.marketFit && lead.marketFit.detail ? lead.marketFit.detail : (lead.mql.basisText || "Sem base suficiente no export.");
+      const warningSummary = lead.warnings.length ? `
+        <div class="grid gap-2 lg:grid-cols-2">
+          ${lead.warnings.map(w => `
+            <div class="overflow-hidden rounded-2xl border bg-white shadow-sm ${w.type === "critical" ? "border-rose-200" : "border-amber-200"}">
+              <div class="border-b px-2.5 py-1 text-[10px] font-bold uppercase tracking-[0.14em] ${w.type === "critical" ? "border-rose-100 bg-rose-50 text-rose-900" : "border-amber-100 bg-amber-50 text-amber-900"}">${w.title}</div>
+              <div class="p-2.5 text-[12px] leading-5 text-slate-800">${w.desc}</div>
+            </div>
+          `).join("")}
+        </div>
+      ` : "";
+
+      return `
+        <article class="panel rounded-[24px] border border-slate-200 p-3 shadow-[0_18px_42px_rgba(15,23,42,0.09)]">
+          <div class="flex flex-col gap-2 border-b border-slate-200 pb-2.5 xl:flex-row xl:items-start xl:justify-between">
+            <div class="min-w-0">
+              <div class="text-[10px] font-bold uppercase tracking-[0.24em] text-slate-500">Oportunidade</div>
+              <h2 class="mt-1 max-w-4xl text-[19px] font-bold leading-tight tracking-tight text-slate-950">${lead.enterpriseId ? `[${lead.enterpriseId}] ` : ""}${lead.company}</h2>
+              <div class="mt-1 flex flex-wrap gap-x-3 gap-y-1 text-[12px] text-slate-600">
+                <span>${contactName}</span>
+                ${email ? `<span>${email}</span>` : ""}
+                ${lead.title ? `<span class="font-semibold uppercase tracking-[0.12em] text-slate-500">${lead.title}</span>` : ""}
+              </div>
+            </div>
+            <div class="flex flex-wrap gap-1.5 xl:max-w-[560px] xl:justify-end">
+              <span class="inline-flex rounded-xl border px-2.5 py-1 text-[10px] font-bold uppercase tracking-[0.16em] ${lead.specialist.badgeCls}">${lead.specialist.classification}</span>
+              <span class="inline-flex rounded-xl border px-2.5 py-1 text-[10px] font-bold uppercase tracking-[0.16em] ${lead.mql.cls}">${lead.mql.label}</span>
+              ${lead.warnings.some(w => w.type === "critical") ? `<span class="inline-flex rounded-xl border border-rose-200 bg-rose-50 px-2.5 py-1 text-[10px] font-bold uppercase tracking-[0.16em] text-rose-700">${lead.warnings.filter(w => w.type === "critical").length} crítico(s)</span>` : ""}
+              ${lead.warnings.some(w => w.type === "warning") ? `<span class="inline-flex rounded-xl border border-amber-200 bg-amber-50 px-2.5 py-1 text-[10px] font-bold uppercase tracking-[0.16em] text-amber-700">${lead.warnings.filter(w => w.type === "warning").length} alerta(s)</span>` : ""}
+            </div>
+          </div>
+
+          <div class="mt-3 grid gap-2.5 xl:grid-cols-[260px_minmax(0,1fr)] xl:items-start">
+            <div class="overflow-hidden rounded-[24px] bg-slate-900 shadow-[0_22px_40px_rgba(15,23,42,0.22)]">
+              <div class="border-b border-white/10 px-3 py-2">
+                <div class="text-[10px] font-bold uppercase tracking-[0.18em] text-teal-300">Motivo e anotação</div>
+                <div class="mt-1.5 inline-flex rounded-xl border border-white/15 bg-white/10 px-2.5 py-1 text-[10px] font-bold uppercase tracking-[0.16em] text-white">${lead.reason || "Sem motivo"}</div>
+              </div>
+              <div class="px-3 py-3">
+                <div class="text-[14px] font-semibold leading-6 tracking-tight text-white">"${lead.summary || "Sem comentário registrado no CRM."}"</div>
+                <div class="mt-2.5 grid grid-cols-2 gap-2">
+                  <div class="rounded-2xl border border-white/10 bg-white/5 px-2.5 py-2.5">
+                    <div class="text-[10px] font-bold uppercase tracking-[0.16em] text-slate-400">Responsável</div>
+                    <div class="mt-1 text-sm font-semibold text-white">${lead.seller}</div>
+                  </div>
+                  <div class="rounded-2xl border border-white/10 bg-white/5 px-2.5 py-2.5">
+                    <div class="text-[10px] font-bold uppercase tracking-[0.16em] text-slate-400">Ciclo</div>
+                    <div class="mt-1 text-sm font-semibold text-white">${lead.cycleDays == null ? "Sem data" : `${lead.cycleDays} dia(s)`}</div>
+                  </div>
+                </div>
+                <div class="mt-2.5 rounded-2xl border border-white/10 bg-white/5 px-2.5 py-2 text-[12px] leading-5 text-slate-200">${buildChannelMixText({ callsCount: lead.callsCount, emailsCount: lead.emailsCount })}</div>
+              </div>
+            </div>
+
+            <div class="space-y-2.5">
+              <div class="overflow-hidden rounded-[24px] border border-slate-200 bg-white shadow-sm">
+                <div class="flex flex-col gap-2 border-b border-slate-200 bg-slate-900 px-3 py-2 lg:flex-row lg:items-center lg:justify-between">
+                  <div>
+                    <div class="text-[10px] font-bold uppercase tracking-[0.18em] text-slate-300">Resposta da auditoria</div>
+                    <div class="mt-0.5 text-[15px] font-semibold text-white">Leitura comercial estruturada</div>
+                  </div>
+                  <span class="inline-flex rounded-xl border px-2.5 py-1 text-[10px] font-bold uppercase tracking-[0.16em] ${lead.specialist.badgeCls}">${lead.specialist.classification}</span>
+                </div>
+
+                ${lead.specialist.nextAction ? `<div class="px-3 pt-3">${renderActionSection(lead.specialist.nextAction)}</div>` : ""}
+                <div class="grid gap-2 p-3 ${lead.specialist.nextAction ? "pt-2" : ""} lg:grid-cols-2">
+                  ${renderAssessmentSection("Leitura do caso", lead.specialist.caseRead)}
+                  ${renderAssessmentSection("Validação do descarte", lead.specialist.discardValidation)}
+                  ${renderAssessmentSection("Leitura comercial", lead.specialist.commercialRead)}
+                  ${renderAssessmentSection("Conclusão", lead.specialist.conclusion)}
+                </div>
+              </div>
+
+              ${warningSummary}
+            </div>
+          </div>
+
+          <div class="mt-2.5 grid gap-2.5 xl:grid-cols-[1fr_1.45fr] xl:items-start">
+            <div class="rounded-[24px] border border-slate-200 bg-slate-50 p-3">
+              <div class="flex flex-col gap-2 lg:flex-row lg:items-start lg:justify-between">
+                <div>
+                  <div class="text-[10px] font-bold uppercase tracking-[0.18em] text-slate-600">Execução comercial</div>
+                  <div class="mt-1 max-w-[560px] text-[11px] leading-4 text-slate-500">O total principal da auditoria vem do campo <span class="font-semibold text-slate-700">"Número de contatos efetuados / Attempts"</span>. Os outros cards mostram o detalhamento visível do histórico e não devem ser somados por cima desse total.</div>
+                </div>
+                <div class="inline-flex rounded-xl border border-brand-200 bg-brand-50 px-2.5 py-1 text-[10px] font-bold uppercase tracking-[0.14em] text-brand-700">Total considerado: ${lead.contacts}</div>
+              </div>
+              <div class="mt-2 grid grid-cols-2 gap-2 md:grid-cols-4 xl:grid-cols-4">
+                ${renderLeadMetric("Total export", String(lead.contacts), "text-slate-900")}
+                ${renderLeadMetric("Ligações assoc.", String(lead.callsCount), "text-slate-900")}
+                ${renderLeadMetric("E-mails assoc.", String(lead.emailsCount), "text-slate-900")}
+                ${renderLeadMetric("Lig. atendidas", String(lead.connectedCount), "text-slate-900")}
+              </div>
+              <div class="mt-2 rounded-2xl border border-slate-200 bg-white p-2.5 text-[12px] leading-5 text-slate-700">${lead.cadenceEvidenceText}</div>
+            </div>
+
+            <div class="rounded-[24px] border border-slate-200 bg-white p-3 shadow-sm">
+              <div class="text-[10px] font-bold uppercase tracking-[0.18em] text-slate-600">Perfil do lead</div>
+              <div class="mt-2 grid gap-2 lg:grid-cols-[1fr_1fr_1.05fr]">
+                <div class="rounded-2xl border border-slate-200 bg-slate-50 px-2.5 py-2.5">
+                  <div class="text-[10px] font-bold uppercase tracking-[0.16em] text-slate-500">Contato principal</div>
+                  <div class="mt-1 text-sm font-semibold text-slate-900">${contactName}</div>
+                  ${email ? `<div class="mt-1 text-[12px] text-slate-600 break-all">${email}</div>` : ""}
+                  ${lead.title ? `<div class="mt-2 text-[10px] font-bold uppercase tracking-[0.14em] text-slate-500">${lead.title}</div>` : ""}
+                </div>
+                <div class="rounded-2xl border border-slate-200 bg-white px-2.5 py-2.5">
+                  <div class="text-[10px] font-bold uppercase tracking-[0.16em] text-slate-500">Leitura MQL</div>
+                  <div class="mt-1 text-sm font-semibold text-slate-900">${lead.mql.label}</div>
+                  <div class="mt-1 text-[12px] leading-5 text-slate-600">${lead.mql.basisText || "Sem base suficiente no export."}</div>
+                </div>
+                <div class="rounded-2xl border border-slate-200 bg-white px-2.5 py-2.5">
+                  <div class="text-[10px] font-bold uppercase tracking-[0.16em] text-slate-500">Visão comercial</div>
+                  <div class="mt-1 text-sm font-semibold text-slate-900">${marketStatus}</div>
+                  <div class="mt-1 text-[12px] leading-5 text-slate-600">${marketDetail}</div>
+                </div>
+              </div>
+            </div>
+          </div>
+        </article>
+      `;
+    }
+
+    function renderDonutCard(title, subtitle, items, centerValue, centerLabel) {
+      const validItems = items.filter(item => item.count > 0);
+      if (!validItems.length) {
+        return `<div class="panel rounded-xl p-6"><h3 class="text-base font-bold text-slate-800">${title}</h3><p class="mt-1 text-xs text-slate-500">${subtitle}</p><p class="mt-8 text-sm text-slate-500">Sem dados suficientes para montar este gráfico.</p></div>`;
+      }
+      const palette = ["#14b8a6", "#0284c7", "#f59e0b", "#f43f5e", "#6366f1", "#10b981"];
+      const topItems = validItems.slice(0, 5);
+      if (validItems.length > 5) {
+        const extra = validItems.slice(5).reduce((acc, item) => acc + item.count, 0);
+        if (extra) topItems.push({ name: "Outros", count: extra });
+      }
+      const total = topItems.reduce((acc, item) => acc + item.count, 0);
+      let accDegrees = 0;
+      const gradient = topItems.map((item, index) => {
+        const start = accDegrees;
+        accDegrees += (item.count / total) * 360;
+        return `${palette[index % palette.length]} ${start}deg ${accDegrees}deg`;
+      }).join(", ");
+      return `
+        <div class="panel rounded-xl p-6">
+          <div class="mb-5">
+            <h3 class="text-base font-bold text-slate-800">${title}</h3>
+            <p class="mt-1 text-xs text-slate-500">${subtitle}</p>
+          </div>
+          <div class="grid items-center gap-6 xl:grid-cols-[220px_1fr]">
+            <div class="mx-auto flex h-52 w-52 items-center justify-center rounded-full" style="background: conic-gradient(${gradient});">
+              <div class="flex h-32 w-32 flex-col items-center justify-center rounded-full border border-slate-100 bg-white text-center shadow-sm">
+                <div class="text-3xl font-black text-slate-900">${centerValue}</div>
+                <div class="text-[10px] font-bold uppercase tracking-[0.18em] text-slate-500">${centerLabel}</div>
+              </div>
+            </div>
+            <div class="space-y-2">
+              ${topItems.map((item, index) => `
+                <div class="flex items-center justify-between gap-4 rounded-xl border border-slate-200 px-3 py-2">
+                  <span class="flex items-center gap-3">
+                    <span class="h-3 w-3 rounded-full" style="background:${palette[index % palette.length]}"></span>
+                    <span class="truncate text-sm font-semibold text-slate-800">${item.name}</span>
+                  </span>
+                  <span class="text-sm font-bold text-slate-500">${item.count}</span>
+                </div>
+              `).join("")}
+            </div>
+          </div>
+        </div>
+      `;
+    }
+
+    function renderDashboard() {
+      const d = dashboardData();
+      const sellerOptions = sellers(state.rows).map(v => `<option ${v === state.dashSeller ? "selected" : ""}>${v}</option>`).join("");
+      return `
+        <div class="mx-auto w-full max-w-[1500px] pb-10">
+          <div class="mb-6 flex flex-col gap-4 xl:flex-row xl:items-end xl:justify-between">
+            <div>
+              <h1 class="text-3xl font-bold tracking-tight text-slate-800">Dashboard Analítico</h1>
+              <p class="mt-2 max-w-3xl text-sm leading-7 text-slate-500">Visão executiva da base auditada, separando descartes corretos, descartes duvidosos e oportunidades perdidas com base na leitura comercial do histórico.</p>
+            </div>
+            <div class="flex flex-wrap items-end gap-4">
+              <div>
+                <label class="mb-1.5 block text-[10px] font-bold uppercase tracking-widest text-slate-500">Vendedor</label>
+                <select id="dashSeller" class="w-64 rounded-lg border border-slate-300 bg-white px-4 py-2 text-sm font-semibold text-slate-800 outline-none">${sellerOptions}</select>
+              </div>
+              <button id="pdfBtn" class="rounded-lg bg-brand-600 px-5 py-2 text-sm font-semibold text-white hover:bg-brand-700">Baixar PDF</button>
+            </div>
+          </div>
+          <div class="mb-8 grid grid-cols-1 gap-6 md:grid-cols-4">
+            ${renderMetricCard("Oportunidades auditadas", d.total, "text-slate-800")}
+            ${renderMetricCard("Descartes corretos", d.correct, "text-teal-600")}
+            ${renderMetricCard("Descartes duvidosos", d.doubtful, "text-amber-500")}
+            ${renderMetricCard("Oportunidades perdidas", d.lost, "text-rose-600")}
+          </div>
+          <div class="grid grid-cols-1 gap-6 xl:grid-cols-2">
+            ${renderDonutCard("Classificação final", "Como a base se distribui entre descarte correto, duvidoso e oportunidade perdida.", d.byStatus, d.total, "oportunidades")}
+            ${renderDonutCard("Leitura de MQL", "Mostra a aderência comercial dos leads que chegaram ao time.", d.byMql, d.total, "leads")}
+            ${renderDonutCard("Motivos de descarte", "Distribuição dos motivos registrados na base consolidada.", d.byReason, d.total, "registros")}
+            ${renderDonutCard("Comparativo entre vendedores", "Volume de descartes duvidosos e oportunidades perdidas por responsável.", d.bySeller.map(item => ({ name: item.name, count: item.issues })), d.bySeller.reduce((acc, item) => acc + item.issues, 0), "revisões")}
+          </div>
+          <div class="panel mt-6 rounded-xl p-6">
+            <h3 class="text-base font-bold text-slate-800">Taxa de revisão por vendedor</h3>
+            <p class="mt-1 text-xs text-slate-500">A taxa considera os casos classificados como descarte duvidoso ou oportunidade perdida.</p>
+            <div class="mt-5 space-y-4">
+              ${d.bySeller.map(item => `
+                <div class="rounded-xl border border-slate-200 p-4">
+                  <div class="mb-2 flex items-center justify-between gap-3">
+                    <span class="truncate text-sm font-semibold text-slate-800">${item.name}</span>
+                    <span class="text-xs font-bold text-slate-500">${item.issues}/${item.total} | ${(item.rate * 100).toFixed(1)}%</span>
+                  </div>
+                  <div class="h-3 w-full overflow-hidden rounded-full bg-slate-100">
+                    <div class="h-full bg-rose-500" style="width:${item.total ? (item.issues / item.total) * 100 : 0}%"></div>
+                  </div>
+                  <div class="mt-2 text-[11px] text-slate-500">${item.correct} correto(s) | ${item.doubtful} duvidoso(s) | ${item.lost} perdida(s)</div>
+                </div>
+              `).join("")}
+            </div>
+          </div>
+        </div>
+      `;
+    }
+
+    function renderAudit() {
+      const rows = filteredRows();
+      const sellerOptions = sellers(state.rows).map(v => `<option ${v === state.filters.seller ? "selected" : ""}>${v}</option>`).join("");
+      const reasonOptions = reasons(state.rows).map(v => `<option ${v === state.filters.reason ? "selected" : ""}>${v}</option>`).join("");
+      const actionHighlights = Object.entries(rows.reduce((acc, item) => {
+        const action = String(item.specialist.nextAction || "").trim();
+        if (action) acc[action] = (acc[action] || 0) + 1;
+        return acc;
+      }, {})).sort((a, b) => b[1] - a[1]).slice(0, 3);
+      return `
+        <div class="mx-auto w-full max-w-[1500px] pb-10">
+          <div class="mb-6 flex flex-col gap-4 xl:flex-row xl:items-end xl:justify-between">
+            <div>
+              <h1 class="text-3xl font-bold tracking-tight text-slate-800">Auditoria de Descartes</h1>
+              <p class="mt-2 max-w-3xl text-sm leading-7 text-slate-500">A leitura abaixo cruza motivo do descarte, comentário do vendedor, cadência, canais usados e qualidade comercial do lead para separar erro real de problema de origem, timing ou qualificação.</p>
+            </div>
+            <button id="pdfBtn" class="rounded-lg bg-brand-600 px-5 py-2 text-sm font-semibold text-white hover:bg-brand-700">Baixar PDF</button>
+          </div>
+          <div class="panel mb-6 rounded-[24px] p-6">
+            <div class="mb-5 border-b border-slate-100 pb-4 text-lg font-bold text-slate-800">Filtros</div>
+            <div class="grid grid-cols-1 gap-5 md:grid-cols-4">
+              <input id="search" class="rounded-xl border border-slate-200 bg-slate-50/50 px-4 py-3 text-sm text-slate-800 outline-none" placeholder="Empresa, vendedor ou ID" value="${state.filters.search}">
+              <select id="seller" class="rounded-xl border border-slate-200 bg-slate-50/50 px-4 py-3 text-sm text-slate-800 outline-none">${sellerOptions}</select>
+              <select id="status" class="rounded-xl border border-slate-200 bg-slate-50/50 px-4 py-3 text-sm text-slate-800 outline-none">
+                ${["Todos", "Descarte Correto", "Descarte Duvidoso", "Oportunidade Perdida"].map(v => `<option ${v === state.filters.status ? "selected" : ""}>${v}</option>`).join("")}
+              </select>
+              <select id="reason" class="rounded-xl border border-slate-200 bg-slate-50/50 px-4 py-3 text-sm text-slate-800 outline-none">${reasonOptions}</select>
+            </div>
+          </div>
+          <div class="space-y-5">
+            <div class="flex flex-col gap-3 rounded-[26px] border border-slate-200 bg-[linear-gradient(135deg,rgba(255,255,255,0.96),rgba(240,253,250,0.88))] px-5 py-4 shadow-[0_12px_30px_rgba(15,23,42,0.05)] md:flex-row md:items-center md:justify-between">
+              <div>
+                <div class="text-[10px] font-bold uppercase tracking-[0.2em] text-slate-400">Resultados da auditoria</div>
+                <h2 class="mt-1 text-lg font-bold tracking-tight text-slate-900">${rows.length} lead(s) na visualização atual</h2>
+              </div>
+              <div class="flex flex-wrap gap-2">
+                <span class="inline-flex rounded-xl border border-teal-200 bg-teal-50 px-3 py-1.5 text-[10px] font-bold uppercase tracking-[0.16em] text-teal-700">${rows.filter(item => item.specialist.classification === "Descarte Correto").length} corretos</span>
+                <span class="inline-flex rounded-xl border border-amber-200 bg-amber-50 px-3 py-1.5 text-[10px] font-bold uppercase tracking-[0.16em] text-amber-700">${rows.filter(item => item.specialist.classification === "Descarte Duvidoso").length} duvidosos</span>
+                <span class="inline-flex rounded-xl border border-rose-200 bg-rose-50 px-3 py-1.5 text-[10px] font-bold uppercase tracking-[0.16em] text-rose-700">${rows.filter(item => item.specialist.classification === "Oportunidade Perdida").length} perdidos</span>
+              </div>
+            </div>
+
+            ${actionHighlights.length ? `
+              <div class="rounded-[24px] border border-amber-200 bg-[linear-gradient(135deg,#fffaf0,#fffbeb)] px-4 py-3 shadow-sm">
+                <div class="flex flex-col gap-3 xl:flex-row xl:items-start xl:justify-between">
+                  <div class="xl:max-w-[240px]">
+                    <div class="text-[10px] font-bold uppercase tracking-[0.18em] text-amber-800">Acionamentos em destaque</div>
+                    <div class="mt-1 text-sm font-semibold text-slate-900">Direcionamentos que mais aparecem na base atual</div>
+                  </div>
+                  <div class="grid flex-1 gap-2 lg:grid-cols-3">
+                    ${actionHighlights.map(([action, count]) => `
+                      <div class="rounded-2xl border border-amber-200/90 bg-white/90 px-3 py-2.5">
+                        <div class="text-[10px] font-bold uppercase tracking-[0.16em] text-amber-700">${count} lead(s)</div>
+                        <div class="mt-1 text-[12px] font-semibold leading-5 text-slate-900">${action.length > 110 ? `${action.slice(0, 109).trim()}...` : action}</div>
+                      </div>
+                    `).join("")}
+                  </div>
+                </div>
+              </div>
+            ` : ""}
+
+            ${rows.length ? rows.map(renderAuditLeadCard).join("") : `
+              <div class="panel rounded-[26px] p-10 text-center">
+                <div class="text-[10px] font-bold uppercase tracking-[0.2em] text-slate-400">Sem resultados</div>
+                <div class="mt-2 text-lg font-semibold text-slate-900">Nenhum lead corresponde aos filtros atuais.</div>
+                <div class="mt-2 text-sm text-slate-500">Ajuste vendedor, status, motivo ou busca para ampliar a visualização.</div>
+              </div>
+            `}
+          </div>
+        </div>
+      `;
+    }
+
+    function render() {
+      const app = document.getElementById("app");
+      app.innerHTML = state.rows.length ? (state.view === "dashboard" ? renderDashboard() : renderAudit()) : renderUpload();
+
+      document.getElementById("nav-auditoria").className = `nav-btn w-full rounded-lg px-3 py-2 text-left ${state.view === "auditoria" ? "bg-brand-600/10 text-brand-400 border border-brand-500/20" : "hover:bg-slate-800"}`;
+      document.getElementById("nav-dashboard").className = `nav-btn w-full rounded-lg px-3 py-2 text-left ${state.view === "dashboard" ? "bg-brand-600/10 text-brand-400 border border-brand-500/20" : "hover:bg-slate-800"}`;
+
+      document.getElementById("nav-auditoria").onclick = () => { state.view = "auditoria"; render(); };
+      document.getElementById("nav-dashboard").onclick = () => { state.view = "dashboard"; render(); };
+
+      const upload = document.getElementById("fileUpload");
+      if (upload) upload.onchange = async (e) => {
+        state.fileName = e.target.files.length > 1 ? `${e.target.files.length} arquivos analisados` : e.target.files[0].name;
+        state.rows = await readFiles(e.target.files);
+        render();
+      };
+      const replaceUpload = document.getElementById("replaceUpload");
+      if (replaceUpload) replaceUpload.onchange = async (e) => {
+        state.fileName = e.target.files.length > 1 ? `${e.target.files.length} arquivos analisados` : e.target.files[0].name;
+        state.rows = await readFiles(e.target.files);
+        render();
+      };
+
+      const pdfBtn = document.getElementById("pdfBtn");
+      if (pdfBtn) pdfBtn.onclick = () => {
+        const exportRows = state.view === "dashboard"
+          ? (state.dashSeller === "Todos" ? state.rows : state.rows.filter(item => item.seller === state.dashSeller))
+          : filteredRows();
+        exportPdf(exportRows);
+      };
+
+      const search = document.getElementById("search");
+      if (search) search.oninput = (e) => { state.filters.search = e.target.value; render(); };
+      const seller = document.getElementById("seller");
+      if (seller) seller.onchange = (e) => { state.filters.seller = e.target.value; render(); };
+      const status = document.getElementById("status");
+      if (status) status.onchange = (e) => { state.filters.status = e.target.value; render(); };
+      const reason = document.getElementById("reason");
+      if (reason) reason.onchange = (e) => { state.filters.reason = e.target.value; render(); };
+      const dashSeller = document.getElementById("dashSeller");
+      if (dashSeller) dashSeller.onchange = (e) => { state.dashSeller = e.target.value; render(); };
+    }
+
+    render();
+  </script>
+</body>
+</html>
